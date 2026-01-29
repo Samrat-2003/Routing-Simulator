@@ -1,0 +1,17 @@
+{
+    "network": {
+        "default_topology": "mesh",
+        "node_count": 10,
+        "edge_probability": 0.3
+    },
+    "traffic": {
+        "default_intensity": "medium",
+        "low_intensity": 5,
+        "medium_intensity": 20,
+        "high_intensity": 50
+    },
+    "simulation": {
+        "max_iterations": 100,
+        "default_algorithm": "dijkstra"
+    }
+}
