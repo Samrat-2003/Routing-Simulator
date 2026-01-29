@@ -19,5 +19,5 @@ This project implements a comprehensive network routing simulation framework to 
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd routing_simulator
+git clone https://github.com/Samrat-2003/Routing-Simulator.git
+
