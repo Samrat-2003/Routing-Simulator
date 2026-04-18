@@ -1,11 +1,27 @@
 import networkx as nx
 import random
 import json
+import os
 
 class NetworkTopology:
-    def __init__(self, config_path="config/config.json"):
-        with open(config_path, 'r') as f:
-            self.config = json.load(f)
+    def __init__(self, config_path=None):
+        # Default config values used when the file is missing or not specified
+        _defaults = {
+            "network": {"node_count": 10, "edge_probability": 0.3},
+            "traffic": {"low_intensity": 10, "medium_intensity": 20, "high_intensity": 40}
+        }
+
+        if config_path is None:
+            # Always resolve relative to this file, not the working directory
+            _here = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(_here, "..", "..", "config", "config.json")
+
+        try:
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.config = _defaults
+
         self.graph = None
         
     def create_mesh_topology(self, n_nodes=10):

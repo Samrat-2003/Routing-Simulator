@@ -1,309 +1,350 @@
+import sys
+import os
+
+# Ensure project root is on sys.path regardless of where this file is run from
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import dash
-from dash import dcc, html, Input, Output, callback
+from dash import dcc, html, Input, Output, State
 import plotly.graph_objs as go
 import networkx as nx
-import pandas as pd
-import random
 
 from src.network.topology import NetworkTopology
 from src.algorithms.routing import create_routing_algorithm
 from src.traffic.generator import TrafficGenerator
 from src.metrics.analyzer import PerformanceMetrics
 
-# Initialize the Dash app
+# ── App init ─────────────────────────────────────────────────────────────────
 app = dash.Dash(__name__)
 
-# Global variables to store state
 current_network = None
-current_algorithm = None
-current_paths = []
 
-# App layout
-app.layout = html.Div([
-    html.H1("Network Routing Algorithm Analyzer", style={'text-align': 'center'}),
-    
-    html.Div([
-        html.Div([
-            html.H3("Network Configuration"),
-            dcc.Dropdown(
-                id='topology-type',
-                options=[
-                    {'label': 'Mesh', 'value': 'mesh'},
-                    {'label': 'Random', 'value': 'random'},
-                    {'label': 'Ring', 'value': 'ring'},
-                    {'label': 'Star', 'value': 'star'}
-                ],
-                value='mesh',
-                style={'width': '100%'}
-            ),
-            html.Br(),
-            html.Label("Number of Nodes:"),
-            dcc.Slider(id='node-count', min=5, max=20, step=1, value=10,
-                      marks={i: str(i) for i in range(5, 21, 5)}),
-            html.Br(),
-            html.Button('Generate Network', id='generate-network', n_clicks=0),
-        ], style={'width': '30%', 'display': 'inline-block', 'vertical-align': 'top'}),
-        
-        html.Div([
-            html.H3("Traffic Configuration"),
-            dcc.Dropdown(
-                id='traffic-intensity',
-                options=[
-                    {'label': 'Low', 'value': 'low'},
-                    {'label': 'Medium', 'value': 'medium'},
-                    {'label': 'High', value: 'high'}
-                ],
-                value='medium',
-                style={'width': '100%'}
-            ),
-            html.Br(),
-            html.Label("Number of Flows:"),
-            dcc.Input(id='flow-count', type='number', value=20, min=1, max=100),
-            html.Br(),
-            html.Button('Generate Traffic', id='generate-traffic', n_clicks=0),
-        ], style={'width': '30%', 'display': 'inline-block', 'vertical-align': 'top'}),
-        
-        html.Div([
-            html.H3("Routing Algorithm"),
-            dcc.Dropdown(
-                id='algorithm-type',
-                options=[
-                    {'label': 'Dijkstra', 'value': 'dijkstra'},
-                    {'label': 'Bellman-Ford', 'value': 'bellman_ford'},
-                    {'label': 'Ant Colony Optimization', 'value': 'aco'},
-                    {'label': 'Genetic Algorithm', 'value': 'ga'}
-                ],
-                value='dijkstra',
-                style={'width': '100%'}
-            ),
-            html.Br(),
-            html.Button('Run Simulation', id='run-simulation', n_clicks=0),
-        ], style={'width': '30%', 'display': 'inline-block', 'vertical-align': 'top'}),
-    ]),
-    
-    html.Hr(),
-    
-    html.Div([
-        html.Div([
-            html.H3("Network Topology Visualization"),
-            dcc.Graph(id='network-graph')
-        ], style={'width': '50%', 'display': 'inline-block'}),
-        
-        html.Div([
-            html.H3("Performance Metrics"),
-            html.Div(id='metrics-display'),
-            html.H3("Routing Paths"),
-            html.Div(id='paths-display')
-        ], style={'width': '50%', 'display': 'inline-block', 'vertical-align': 'top'})
-    ]),
-    
-    html.Hr(),
-    
-    html.Div([
-        html.H3("Algorithm Comparison"),
-        html.Button('Compare All Algorithms', id='compare-algorithms', n_clicks=0),
-        html.Div(id='comparison-results')
-    ])
-])
+# ── Styles ────────────────────────────────────────────────────────────────────
+CARD  = {'background': '#f9f9f9', 'border': '1px solid #ddd', 'borderRadius': '8px',
+         'padding': '16px', 'marginBottom': '16px'}
+LABEL = {'fontWeight': 'bold', 'marginTop': '10px', 'display': 'block'}
+INPUT = {'width': '100%', 'padding': '6px', 'boxSizing': 'border-box', 'marginTop': '4px'}
+BTN   = {'marginTop': '14px', 'width': '100%', 'padding': '10px', 'background': '#2c7be5',
+         'color': 'white', 'border': 'none', 'borderRadius': '6px', 'cursor': 'pointer',
+         'fontWeight': 'bold', 'fontSize': '14px'}
+TH    = {'border': '1px solid #ccc', 'padding': '8px', 'background': '#eef2f7', 'textAlign': 'left'}
+TD    = {'border': '1px solid #ccc', 'padding': '8px'}
 
-# Callbacks
-@app.callback(
-    Output('network-graph', 'figure'),
-    Input('generate-network', 'n_clicks'),
-    Input('topology-type', 'value'),
-    Input('node-count', 'value')
+# ── Layout ────────────────────────────────────────────────────────────────────
+app.layout = html.Div(
+    style={'fontFamily': 'Arial, sans-serif', 'maxWidth': '1400px',
+           'margin': '0 auto', 'padding': '20px'},
+    children=[
+
+        html.H1("Network Routing Algorithm Analyzer",
+                style={'textAlign': 'center', 'color': '#1a1a2e', 'marginBottom': '24px'}),
+
+        # ── Row 1: three config cards ────────────────────────────────────────
+        html.Div(style={'display': 'flex', 'gap': '16px', 'flexWrap': 'wrap'}, children=[
+
+            # Card 1 – Network
+            html.Div(style={**CARD, 'flex': '1', 'minWidth': '260px'}, children=[
+                html.H3("① Network Configuration", style={'marginTop': 0}),
+
+                html.Label("Topology Type", style=LABEL),
+                dcc.Dropdown(
+                    id='topology-type',
+                    options=[
+                        {'label': 'Mesh (fully connected)', 'value': 'mesh'},
+                        {'label': 'Random (Erdős–Rényi)',   'value': 'random'},
+                        {'label': 'Ring',                   'value': 'ring'},
+                        {'label': 'Star',                   'value': 'star'},
+                    ],
+                    value='random',
+                    clearable=False,
+                ),
+
+                html.Label("Number of Nodes (10 – 200)", style=LABEL),
+                dcc.Input(id='node-count', type='number', value=20,
+                          min=10, max=200, step=1, style=INPUT),
+
+                # Edge probability – only relevant for random topology
+                html.Div(id='edge-prob-container', children=[
+                    html.Label("Edge Probability (0.1 – 0.8)", style=LABEL),
+                    dcc.Input(id='edge-prob', type='number', value=0.3,
+                              min=0.1, max=0.8, step=0.05, style=INPUT),
+                ]),
+
+                html.Button('Generate Network', id='generate-network', n_clicks=0, style=BTN),
+                html.Div(id='network-status',
+                         style={'marginTop': '8px', 'color': '#555', 'fontSize': '13px'}),
+            ]),
+
+            # Card 2 – Traffic
+            html.Div(style={**CARD, 'flex': '1', 'minWidth': '260px'}, children=[
+                html.H3("② Traffic Configuration", style={'marginTop': 0}),
+
+                html.Label("Traffic Intensity", style=LABEL),
+                dcc.Dropdown(
+                    id='traffic-intensity',
+                    options=[
+                        {'label': 'Low  (10 flows)',    'value': 'low'},
+                        {'label': 'Medium  (20 flows)', 'value': 'medium'},
+                        {'label': 'High  (40 flows)',   'value': 'high'},
+                        {'label': 'Custom',             'value': 'custom'},
+                    ],
+                    value='medium',
+                    clearable=False,
+                ),
+
+                # Custom flow count – shown only when Custom is selected
+                html.Div(id='custom-flow-container', style={'display': 'none'}, children=[
+                    html.Label("Number of Flows (1 – 100)", style=LABEL),
+                    dcc.Input(id='flow-count', type='number', value=20,
+                              min=1, max=100, step=1, style=INPUT),
+                ]),
+            ]),
+
+            # Card 3 – Algorithm
+            html.Div(style={**CARD, 'flex': '1', 'minWidth': '260px'}, children=[
+                html.H3("③ Routing Algorithm", style={'marginTop': 0}),
+
+                html.Label("Algorithm", style=LABEL),
+                dcc.Dropdown(
+                    id='algorithm-type',
+                    options=[
+                        {'label': 'Dijkstra (shortest path)',       'value': 'dijkstra'},
+                        {'label': 'Bellman-Ford (distributed SP)',  'value': 'bellman_ford'},
+                        {'label': 'ACO (Ant Colony Optimization)',  'value': 'aco'},
+                        {'label': 'GA (Genetic Algorithm)',         'value': 'ga'},
+                        {'label': 'ALL – compare every algorithm',  'value': 'all'},
+                    ],
+                    value='dijkstra',
+                    clearable=False,
+                ),
+
+                html.Button('Run Simulation', id='run-simulation', n_clicks=0, style=BTN),
+            ]),
+        ]),
+
+        html.Hr(),
+
+        # ── Row 2: graph + metrics ───────────────────────────────────────────
+        html.Div(style={'display': 'flex', 'gap': '16px', 'flexWrap': 'wrap'}, children=[
+
+            html.Div(style={**CARD, 'flex': '1.2', 'minWidth': '340px'}, children=[
+                html.H3("Network Topology", style={'marginTop': 0}),
+                dcc.Graph(id='network-graph', style={'height': '420px'}),
+            ]),
+
+            html.Div(style={**CARD, 'flex': '0.8', 'minWidth': '280px'}, children=[
+                html.H3("Performance Metrics", style={'marginTop': 0}),
+                html.Div(id='metrics-display', style={'fontSize': '14px'}),
+                html.H3("Sample Paths", style={'marginTop': '16px'}),
+                html.Div(id='paths-display', style={'fontSize': '13px'}),
+            ]),
+        ]),
+
+        html.Hr(),
+
+        # ── Row 3: comparison table ──────────────────────────────────────────
+        html.Div(style=CARD, children=[
+            html.H3("Algorithm Comparison", style={'marginTop': 0}),
+            html.Div(id='comparison-results', style={'fontSize': '14px'}),
+        ]),
+    ],
 )
-def update_network_graph(n_clicks, topology_type, node_count):
-    global current_network
-    
-    if n_clicks > 0:
-        # Generate network
-        current_network = NetworkTopology()
-        
-        if topology_type == 'mesh':
-            current_network.create_mesh_topology(node_count)
-        elif topology_type == 'random':
-            current_network.create_random_topology(node_count, 0.3)
-        elif topology_type == 'ring':
-            current_network.create_ring_topology(node_count)
-        elif topology_type == 'star':
-            current_network.create_star_topology(node_count)
-        
-        # Create network visualization
-        G = current_network.graph
-        pos = nx.spring_layout(G, seed=42)
-        
-        # Extract edge coordinates
-        edge_x = []
-        edge_y = []
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-        
-        edge_trace = go.Scatter(
-            x=edge_x, y=edge_y,
-            line=dict(width=2, color='#888'),
-            hoverinfo='none',
-            mode='lines'
-        )
-        
-        # Extract node coordinates
-        node_x = []
-        node_y = []
-        node_text = []
-        for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(f'Node {node}')
-        
-        node_trace = go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            hoverinfo='text',
-            text=node_text,
-            textposition="middle center",
-            marker=dict(
-                size=20,
-                color='lightblue',
-                line=dict(width=2, color='darkblue')
-            )
-        )
-        
-        figure = go.Figure(data=[edge_trace, node_trace],
-                          layout=go.Layout(
-                            title=f'{topology_type.capitalize()} Network Topology',
-                            titlefont_size=16,
-                            showlegend=False,
-                            hovermode='closest',
-                            margin=dict(b=20,l=5,r=5,t=40),
-                            annotations=[ dict(
-                                text="Network nodes and connections",
-                                showarrow=False,
-                                xref="paper", yref="paper",
-                                x=0.005, y=-0.07,
-                                xanchor="left", yanchor="bottom",
-                                font=dict(size=14)
-                            ) ],
-                            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
-                          )
-        
-        return figure
-    
-    # Default empty figure
-    return go.Figure()
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 
 @app.callback(
-    [Output('metrics-display', 'children'),
-     Output('paths-display', 'children')],
-    Input('run-simulation', 'n_clicks'),
-    Input('algorithm-type', 'value'),
+    Output('edge-prob-container', 'style'),
+    Input('topology-type', 'value'),
+)
+def toggle_edge_prob(topology):
+    return {'display': 'block'} if topology == 'random' else {'display': 'none'}
+
+
+@app.callback(
+    Output('custom-flow-container', 'style'),
     Input('traffic-intensity', 'value'),
-    Input('flow-count', 'value')
+)
+def toggle_custom_flows(intensity):
+    return {'display': 'block'} if intensity == 'custom' else {'display': 'none'}
+
+
+@app.callback(
+    Output('network-graph',  'figure'),
+    Output('network-status', 'children'),
+    Input('generate-network', 'n_clicks'),
+    State('topology-type', 'value'),
+    State('node-count',    'value'),
+    State('edge-prob',     'value'),
+    prevent_initial_call=True,
+)
+def update_network_graph(n_clicks, topology_type, node_count, edge_prob):
+    global current_network
+
+    node_count = int(node_count or 20)
+    edge_prob  = float(edge_prob  or 0.3)
+
+    current_network = NetworkTopology()
+    if topology_type == 'mesh':
+        current_network.create_mesh_topology(node_count)
+    elif topology_type == 'random':
+        current_network.create_random_topology(node_count, edge_prob)
+    elif topology_type == 'ring':
+        current_network.create_ring_topology(node_count)
+    elif topology_type == 'star':
+        current_network.create_star_topology(node_count)
+
+    G   = current_network.graph
+    pos = nx.spring_layout(G, seed=42)
+
+    edge_x, edge_y = [], []
+    for u, v in G.edges():
+        x0, y0 = pos[u]; x1, y1 = pos[v]
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y, mode='lines',
+        line=dict(width=1.5, color='#aaa'), hoverinfo='none',
+    )
+
+    show_labels = node_count <= 30
+    node_trace = go.Scatter(
+        x=[pos[n][0] for n in G.nodes()],
+        y=[pos[n][1] for n in G.nodes()],
+        mode='markers+text' if show_labels else 'markers',
+        text=[f'Node {n}' for n in G.nodes()],
+        textposition='middle center',
+        hoverinfo='text',
+        marker=dict(
+            size=14 if show_labels else 8,
+            color='#5b8dee',
+            line=dict(width=2, color='#1a4fa0'),
+        ),
+    )
+
+    fig = go.Figure(
+        data=[edge_trace, node_trace],
+        layout=go.Layout(
+            title=f'{topology_type.capitalize()} – {G.number_of_nodes()} nodes, '
+                  f'{G.number_of_edges()} edges',
+            showlegend=False, hovermode='closest',
+            margin=dict(b=10, l=5, r=5, t=40),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        ),
+    )
+
+    status = (f"✔ Network ready — {G.number_of_nodes()} nodes, "
+              f"{G.number_of_edges()} edges"
+              + (f", edge prob {edge_prob}" if topology_type == 'random' else ""))
+    return fig, status
+
+
+@app.callback(
+    Output('metrics-display',    'children'),
+    Output('paths-display',      'children'),
+    Output('comparison-results', 'children'),
+    Input('run-simulation', 'n_clicks'),
+    State('algorithm-type',    'value'),
+    State('traffic-intensity', 'value'),
+    State('flow-count',        'value'),
+    prevent_initial_call=True,
 )
 def run_simulation(n_clicks, algorithm_type, traffic_intensity, flow_count):
-    global current_network, current_algorithm, current_paths
-    
-    if n_clicks > 0 and current_network:
-        # Generate traffic
-        traffic = TrafficGenerator(current_network, traffic_intensity)
-        flows = traffic.generate_flows(flow_count)
-        
-        # Create routing algorithm
-        algorithm = create_routing_algorithm(algorithm_type, current_network)
-        current_algorithm = algorithm
-        
-        # Analyze performance
-        metrics_analyzer = PerformanceMetrics(current_network)
-        results = metrics_analyzer.analyze_routing_performance(algorithm, flows)
-        
-        # Store paths for visualization
-        current_paths = results['paths']
-        
-        # Display metrics
-        metrics_html = html.Div([
-            html.P(f"Execution Time: {results['execution_time']:.4f} seconds"),
-            html.P(f"Successful Routes: {results['successful_routes']}/{results['total_flows']}"),
-            html.P(f"Packet Delivery Ratio: {results['packet_delivery_ratio']:.2%}"),
-            html.P(f"Average Latency: {results['average_latency']:.2f} units"),
-            html.P(f"Average Throughput: {results['average_throughput']:.2f} KB/unit"),
-            html.P(f"Average Hop Count: {results['average_hop_count']:.2f}")
-        ])
-        
-        # Display sample paths
-        paths_html = html.Div([
-            html.P(f"Showing first 5 paths out of {len(current_paths)}:"),
-            html.Ul([
-                html.Li(f"Path {i+1}: {' -> '.join(map(str, path))}") 
-                for i, path in enumerate(current_paths[:5])
-            ])
-        ])
-        
-        return metrics_html, paths_html
-    
-    return html.P("Run simulation to see results"), html.P("No paths generated yet")
-
-@app.callback(
-    Output('comparison-results', 'children'),
-    Input('compare-algorithms', 'n_clicks')
-)
-def compare_all_algorithms(n_clicks):
     global current_network
-    
-    if n_clicks > 0 and current_network:
-        # Generate traffic for comparison
-        traffic = TrafficGenerator(current_network, "medium")
-        flows = traffic.generate_flows(15)
-        
-        # Create all algorithms
-        algorithms = {
-            'Dijkstra': create_routing_algorithm('dijkstra', current_network),
-            'Bellman-Ford': create_routing_algorithm('bellman_ford', current_network),
-            'ACO': create_routing_algorithm('aco', current_network),
-            'GA': create_routing_algorithm('ga', current_network)
-        }
-        
-        # Analyze performance
-        metrics_analyzer = PerformanceMetrics(current_network)
-        comparison = metrics_analyzer.compare_algorithms(algorithms, flows)
-        
-        # Create comparison table
-        table_header = [
-            html.Thead(html.Tr([
-                html.Th("Algorithm"),
-                html.Th("Execution Time (s)"),
-                html.Th("PDR (%)"),
-                html.Th("Avg Latency"),
-                html.Th("Avg Throughput"),
-                html.Th("Avg Hop Count")
-            ]))
-        ]
-        
-        table_rows = []
-        for alg_name, metrics in comparison.items():
-            row = html.Tr([
-                html.Td(alg_name),
-                html.Td(f"{metrics['execution_time']:.4f}"),
-                html.Td(f"{metrics['packet_delivery_ratio']*100:.1f}%"),
-                html.Td(f"{metrics['average_latency']:.2f}"),
-                html.Td(f"{metrics['average_throughput']:.2f}"),
-                html.Td(f"{metrics['average_hop_count']:.2f}")
-            ])
-            table_rows.append(row)
-        
-        table_body = [html.Tbody(table_rows)]
-        
-        return html.Table(table_header + table_body, 
-                         style={'width': '100%', 'border-collapse': 'collapse', 'border': '1px solid black'})
-    
-    return html.P("Click 'Compare All Algorithms' to run comparison")
 
-# Main function to run the app
+    if not current_network:
+        err = html.P("⚠ Please generate a network first.", style={'color': 'red'})
+        return err, html.Div(), html.Div()
+
+    intensity_defaults = {'low': 10, 'medium': 20, 'high': 40}
+    count = int(flow_count or 20) if traffic_intensity == 'custom' \
+            else intensity_defaults.get(traffic_intensity, 20)
+
+    traffic_gen = TrafficGenerator(current_network, traffic_intensity)
+    flows       = traffic_gen.generate_flows(count)
+    analyzer    = PerformanceMetrics(current_network)
+
+    # ── ALL: compare every algorithm ─────────────────────────────────────────
+    if algorithm_type == 'all':
+        algorithms = {
+            'Dijkstra':     create_routing_algorithm('dijkstra',     current_network),
+            'Bellman-Ford': create_routing_algorithm('bellman_ford', current_network),
+            'ACO':          create_routing_algorithm('aco',          current_network),
+            'GA':           create_routing_algorithm('ga',           current_network),
+        }
+        comparison = analyzer.compare_algorithms(algorithms, flows)
+
+        header = html.Thead(html.Tr(
+            [html.Th(c, style=TH) for c in
+             ['Algorithm', 'Time (s)', 'PDR', 'Avg Latency', 'Avg Throughput', 'Avg Hops']]
+        ))
+        rows = [
+            html.Tr([
+                html.Td(name,                                      style=TD),
+                html.Td(f"{m['execution_time']:.4f}",             style=TD),
+                html.Td(f"{m['packet_delivery_ratio']:.2%}",      style=TD),
+                html.Td(f"{m['average_latency']:.2f}",            style=TD),
+                html.Td(f"{m['average_throughput']:.2f} KB/unit", style=TD),
+                html.Td(f"{m['average_hop_count']:.2f}",          style=TD),
+            ])
+            for name, m in comparison.items()
+        ]
+        table = html.Table(
+            [header, html.Tbody(rows)],
+            style={'width': '100%', 'borderCollapse': 'collapse'},
+        )
+        summary = html.P(f"Compared all 4 algorithms on {count} flows.")
+        return summary, html.Div(), table
+
+    # ── Single algorithm ──────────────────────────────────────────────────────
+    algo    = create_routing_algorithm(algorithm_type, current_network)
+    results = analyzer.analyze_routing_performance(algo, flows)
+    paths   = results['paths']
+
+    metrics_html = html.Table(
+        [html.Tbody([
+            html.Tr([html.Td("Algorithm",             style=TH),
+                     html.Td(results['algorithm'],                                    style=TD)]),
+            html.Tr([html.Td("Execution Time",        style=TH),
+                     html.Td(f"{results['execution_time']:.4f} s",                   style=TD)]),
+            html.Tr([html.Td("Successful Routes",     style=TH),
+                     html.Td(f"{results['successful_routes']} / {results['total_flows']}", style=TD)]),
+            html.Tr([html.Td("Packet Delivery Ratio", style=TH),
+                     html.Td(f"{results['packet_delivery_ratio']:.2%}",               style=TD)]),
+            html.Tr([html.Td("Average Latency",       style=TH),
+                     html.Td(f"{results['average_latency']:.2f} units",               style=TD)]),
+            html.Tr([html.Td("Average Throughput",    style=TH),
+                     html.Td(f"{results['average_throughput']:.2f} KB/unit",          style=TD)]),
+            html.Tr([html.Td("Average Hop Count",     style=TH),
+                     html.Td(f"{results['average_hop_count']:.2f}",                   style=TD)]),
+        ])],
+        style={'width': '100%', 'borderCollapse': 'collapse'},
+    )
+
+    paths_html = html.Div([
+        html.P(f"Showing first 5 of {len(paths)} paths:"),
+        html.Ul([html.Li(f"Path {i+1}: {' → '.join(map(str, p))}")
+                 for i, p in enumerate(paths[:5])]),
+    ]) if paths else html.P("No paths found.")
+
+    hint = html.P('Select "ALL" in the algorithm dropdown to compare all algorithms.',
+                  style={'color': '#888', 'fontStyle': 'italic'})
+    return metrics_html, paths_html, hint
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 def run_dashboard():
-    app.run_server(debug=True, port=8050)
+    port = 8050
+    print("\n" + "="*50)
+    print("  Network Routing Analyzer is running!")
+    print(f"  Open your browser and go to:")
+    print(f"  http://localhost:{port}")
+    print("="*50 + "\n")
+    app.run(debug=False, use_reloader=False, port=port)
 
 if __name__ == '__main__':
     run_dashboard()
