@@ -100,6 +100,40 @@ app.layout = html.Div(
                     dcc.Input(id='flow-count', type='number', value=20,
                               min=1, max=100, step=1, style=INPUT),
                 ]),
+
+                html.Label("Congestion Simulation", style=LABEL),
+                html.Div(
+                    style={
+                        'display': 'flex', 'alignItems': 'center', 'gap': '10px',
+                        'marginTop': '6px', 'marginBottom': '4px',
+                    },
+                    children=[
+                        # Toggle switch built from a Checklist
+                        dcc.Checklist(
+                            id='congestion-mode',
+                            options=[{'label': '', 'value': 'on'}],
+                            value=['on'],
+                            inputStyle={
+                                'width': '36px', 'height': '20px', 'cursor': 'pointer',
+                                'accentColor': '#2c7be5',
+                            },
+                        ),
+                        html.Span(
+                            id='congestion-toggle-label',
+                            style={'fontSize': '13px', 'fontWeight': 'bold', 'color': '#2c7be5'},
+                            children='ON',
+                        ),
+                    ],
+                ),
+                html.Div(
+                    id='congestion-info',
+                    style={'fontSize': '11px', 'color': '#2c7be5', 'marginTop': '4px',
+                           'fontStyle': 'italic', 'padding': '6px 8px',
+                           'background': '#eef4ff', 'borderRadius': '4px',
+                           'borderLeft': '3px solid #2c7be5'},
+                    children="Active: each flow degrades edges it uses (+25% weight). "
+                             "Edges used by 3+ flows risk 30% packet drop.",
+                ),
             ]),
 
             # Card 3 – Algorithm
@@ -169,6 +203,39 @@ def toggle_edge_prob(topology):
 )
 def toggle_custom_flows(intensity):
     return {'display': 'block'} if intensity == 'custom' else {'display': 'none'}
+
+
+@app.callback(
+    Output('congestion-toggle-label', 'children'),
+    Output('congestion-toggle-label', 'style'),
+    Output('congestion-info', 'children'),
+    Output('congestion-info', 'style'),
+    Input('congestion-mode', 'value'),
+)
+def update_congestion_ui(value):
+    is_on = bool(value)  # Checklist returns [] when unchecked, ['on'] when checked
+    if is_on:
+        label       = 'ON'
+        label_style = {'fontSize': '13px', 'fontWeight': 'bold', 'color': '#2c7be5'}
+        info_text   = ("Active: each flow degrades edges it uses (+25% weight). "
+                       "Edges used by 3+ flows risk 30% packet drop.")
+        info_style  = {
+            'fontSize': '11px', 'color': '#2c7be5', 'marginTop': '4px',
+            'fontStyle': 'italic', 'padding': '6px 8px',
+            'background': '#eef4ff', 'borderRadius': '4px',
+            'borderLeft': '3px solid #2c7be5',
+        }
+    else:
+        label       = 'OFF'
+        label_style = {'fontSize': '13px', 'fontWeight': 'bold', 'color': '#888'}
+        info_text   = "Disabled: classic static routing — no edge degradation or packet drops."
+        info_style  = {
+            'fontSize': '11px', 'color': '#888', 'marginTop': '4px',
+            'fontStyle': 'italic', 'padding': '6px 8px',
+            'background': '#f5f5f5', 'borderRadius': '4px',
+            'borderLeft': '3px solid #ccc',
+        }
+    return label, label_style, info_text, info_style
 
 
 @app.callback(
@@ -251,9 +318,10 @@ def update_network_graph(n_clicks, topology_type, node_count, edge_prob):
     State('algorithm-type',    'value'),
     State('traffic-intensity', 'value'),
     State('flow-count',        'value'),
+    State('congestion-mode',   'value'),
     prevent_initial_call=True,
 )
-def run_simulation(n_clicks, algorithm_type, traffic_intensity, flow_count):
+def run_simulation(n_clicks, algorithm_type, traffic_intensity, flow_count, congestion_mode):
     global current_network
 
     if not current_network:
@@ -266,7 +334,8 @@ def run_simulation(n_clicks, algorithm_type, traffic_intensity, flow_count):
 
     traffic_gen = TrafficGenerator(current_network, traffic_intensity)
     flows       = traffic_gen.generate_flows(count)
-    analyzer    = PerformanceMetrics(current_network)
+    use_congestion = bool(congestion_mode)  # Checklist: ['on'] = True, [] = False
+    analyzer    = PerformanceMetrics(current_network, simulate_congestion=use_congestion)
 
     # ── ALL: compare every algorithm ─────────────────────────────────────────
     if algorithm_type == 'all':
@@ -278,27 +347,90 @@ def run_simulation(n_clicks, algorithm_type, traffic_intensity, flow_count):
         }
         comparison = analyzer.compare_algorithms(algorithms, flows)
 
+        # ── Scoring ───────────────────────────────────────────────────────────
+        # Normalise each metric across algorithms then compute weighted score
+        def normalise(values, lower_is_better=False):
+            mn, mx = min(values), max(values)
+            if mx == mn:
+                return [1.0] * len(values)
+            norm = [(v - mn) / (mx - mn) for v in values]
+            return [1 - n for n in norm] if lower_is_better else norm
+
+        names   = list(comparison.keys())
+        metrics_list = list(comparison.values())
+
+        pdr_norm       = normalise([m['packet_delivery_ratio'] for m in metrics_list])
+        latency_norm   = normalise([m['average_latency']       for m in metrics_list], lower_is_better=True)
+        time_norm      = normalise([m['execution_time']        for m in metrics_list], lower_is_better=True)
+        throughput_norm= normalise([m['average_throughput']    for m in metrics_list])
+        hops_norm      = normalise([m['average_hop_count']     for m in metrics_list], lower_is_better=True)
+
+        WEIGHTS = {'pdr': 0.40, 'latency': 0.25, 'throughput': 0.15, 'time': 0.12, 'hops': 0.08}
+        scores  = [
+            round(
+                WEIGHTS['pdr']        * pdr_norm[i]        +
+                WEIGHTS['latency']    * latency_norm[i]     +
+                WEIGHTS['throughput'] * throughput_norm[i]  +
+                WEIGHTS['time']       * time_norm[i]        +
+                WEIGHTS['hops']       * hops_norm[i],
+                4
+            )
+            for i in range(len(names))
+        ]
+
+        best_idx  = scores.index(max(scores))
+        best_name = names[best_idx]
+
+        # ── Table ─────────────────────────────────────────────────────────────
+        BEST_ROW = {
+            'background': '#d4edda', 'fontWeight': 'bold',
+            'border': '2px solid #28a745',
+        }
+        BEST_TD  = {**TD, 'background': '#d4edda', 'fontWeight': 'bold'}
+        BEST_TH_CELL = {**TH, 'background': '#d4edda', 'fontWeight': 'bold'}
+
         header = html.Thead(html.Tr(
             [html.Th(c, style=TH) for c in
-             ['Algorithm', 'Time (s)', 'PDR', 'Avg Latency', 'Avg Throughput', 'Avg Hops']]
+             ['Algorithm', 'Time (s)', 'PDR', 'Avg Latency', 'Avg Throughput', 'Avg Hops', 'Score']]
         ))
-        rows = [
-            html.Tr([
-                html.Td(name,                                      style=TD),
-                html.Td(f"{m['execution_time']:.4f}",             style=TD),
-                html.Td(f"{m['packet_delivery_ratio']:.2%}",      style=TD),
-                html.Td(f"{m['average_latency']:.2f}",            style=TD),
-                html.Td(f"{m['average_throughput']:.2f} KB/unit", style=TD),
-                html.Td(f"{m['average_hop_count']:.2f}",          style=TD),
-            ])
-            for name, m in comparison.items()
-        ]
+
+        rows = []
+        for i, (name, m) in enumerate(comparison.items()):
+            is_best  = (i == best_idx)
+            cell     = BEST_TD if is_best else TD
+            label    = f"{name} ★ BEST" if is_best else name
+            rows.append(html.Tr([
+                html.Td(label,                                     style=cell),
+                html.Td(f"{m['execution_time']:.4f}",             style=cell),
+                html.Td(f"{m['packet_delivery_ratio']:.2%}",      style=cell),
+                html.Td(f"{m['average_latency']:.2f}",            style=cell),
+                html.Td(f"{m['average_throughput']:.2f} KB/unit", style=cell),
+                html.Td(f"{m['average_hop_count']:.2f}",          style=cell),
+                html.Td(f"{scores[i]:.4f}",                       style=cell),
+            ]))
+
         table = html.Table(
             [header, html.Tbody(rows)],
             style={'width': '100%', 'borderCollapse': 'collapse'},
         )
-        summary = html.P(f"Compared all 4 algorithms on {count} flows.")
-        return summary, html.Div(), table
+
+        # ── Weight legend ──────────────────────────────────────────────────────
+        legend = html.Div([
+            html.P(
+                f"★ Best overall algorithm: {best_name}  (score {scores[best_idx]:.4f})",
+                style={'color': '#155724', 'fontWeight': 'bold', 'fontSize': '15px',
+                       'margin': '12px 0 4px'}
+            ),
+            html.P(
+                "Score weights — PDR 40%  |  Latency 25%  |  Throughput 15%  |  Time 12%  |  Hops 8%",
+                style={'color': '#555', 'fontSize': '12px', 'fontStyle': 'italic'}
+            ),
+        ])
+
+        congestion_label = "with congestion simulation" if use_congestion else "without congestion (static)"
+        summary = html.P(f"Compared all 4 algorithms on {count} flows — {congestion_label}.",
+                         style={"color": "#155724" if use_congestion else "#555"})
+        return summary, html.Div(), html.Div([legend, table])
 
     # ── Single algorithm ──────────────────────────────────────────────────────
     algo    = create_routing_algorithm(algorithm_type, current_network)

@@ -123,12 +123,13 @@ class ACORouting(RoutingAlgorithm):
     def route(self, source, destination):
         try:
             best_path = self._aco_optimization(source, destination)
+            if best_path is None:
+                # Genuine failure — don't mask it with Dijkstra
+                return None
             return best_path
         except Exception as e:
             print(f"ACO routing failed: {e}")
-            # Fallback to Dijkstra
-            dijkstra = DijkstraRouting(self.network)
-            return dijkstra.route(source, destination)
+            return None
     
     def _aco_optimization(self, source, destination):
         """Run ACO optimization"""
@@ -232,12 +233,12 @@ class GARouting(RoutingAlgorithm):
     def route(self, source, destination):
         try:
             best_path = self._genetic_optimization(source, destination)
+            if best_path is None:
+                return None
             return best_path
         except Exception as e:
             print(f"GA routing failed: {e}")
-            # Fallback to Dijkstra
-            dijkstra = DijkstraRouting(self.network)
-            return dijkstra.route(source, destination)
+            return None
     
     def _genetic_optimization(self, source, destination):
         """Run genetic algorithm optimization"""
