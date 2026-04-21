@@ -41,5 +41,65 @@ class TestNetworkTopology(unittest.TestCase):
         self.assertIn(0, path)
         self.assertIn(4, path)
 
+    def test_seeded_random_topology_is_reproducible(self):
+        """Seeded random topologies should reproduce the same weighted graph."""
+        first = NetworkTopology(seed=123)
+        second = NetworkTopology(seed=123)
+
+        graph_a = first.create_random_topology(10, 0.3, seed=123)
+        graph_b = second.create_random_topology(10, 0.3, seed=123)
+
+        self.assertEqual(sorted(graph_a.edges(data="weight")), sorted(graph_b.edges(data="weight")))
+
+    def test_imported_topology_and_failure_profile(self):
+        """Imported topologies should accept explicit failure rules."""
+        network = NetworkTopology(seed=12)
+        network.load_from_data(
+            nodes=[{"id": 1}, {"id": 2}, {"id": 3}],
+            edges=[
+                {"source": 1, "target": 2, "weight": 2, "bandwidth": 100},
+                {"source": 2, "target": 3, "weight": 3, "bandwidth": 80},
+            ],
+        )
+
+        network.apply_failure_profile(
+            {
+                "packet_loss_nodes": {1: 0.15},
+                "maintenance_edges": {(1, 2): 2.0},
+                "down_edges": [(2, 3)],
+            }
+        )
+
+        self.assertTrue(network.graph.has_edge(1, 2))
+        self.assertFalse(network.graph.has_edge(2, 3))
+        self.assertEqual(network.graph[1][2]["weight"], 4.0)
+        self.assertEqual(network.graph.nodes[1]["packet_loss"], 0.15)
+
+    def test_random_failure_profile_is_reproducible(self):
+        """Random failure profiles should be reproducible with the same seed."""
+        network = NetworkTopology(seed=21)
+        network.create_mesh_topology(6, seed=21)
+
+        first = network.build_random_failure_profile(
+            seed=99,
+            down_node_count=1,
+            down_edge_count=2,
+            packet_loss_node_count=1,
+            packet_loss_edge_count=2,
+            maintenance_edge_count=2,
+        )
+        second = network.build_random_failure_profile(
+            seed=99,
+            down_node_count=1,
+            down_edge_count=2,
+            packet_loss_node_count=1,
+            packet_loss_edge_count=2,
+            maintenance_edge_count=2,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["down_nodes"]), 1)
+        self.assertLessEqual(len(first["down_edges"]), 2)
+
 if __name__ == '__main__':
     unittest.main()

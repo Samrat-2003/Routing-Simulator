@@ -4,7 +4,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from src.network.topology import NetworkTopology
-from src.algorithms.routing import DijkstraRouting, BellmanFordRouting
+from src.algorithms.routing import BellmanFordRouting, DijkstraRouting, GARouting
 
 class TestRoutingAlgorithms(unittest.TestCase):
     def setUp(self):
@@ -47,6 +47,20 @@ class TestRoutingAlgorithms(unittest.TestCase):
         
         # Costs should be equal (both find shortest path)
         self.assertEqual(cost_d, cost_b)
+
+    def test_ga_repairs_invalid_candidate_paths(self):
+        """GA should repair broken paths into valid graph routes."""
+        network = NetworkTopology(seed=11)
+        network.create_ring_topology(6, seed=11)
+        ga = GARouting(network, seed=11)
+
+        repaired = ga._repair_path([0, 3, 5], 0, 4)
+
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired[0], 0)
+        self.assertEqual(repaired[-1], 4)
+        for index in range(len(repaired) - 1):
+            self.assertTrue(network.graph.has_edge(repaired[index], repaired[index + 1]))
 
 if __name__ == '__main__':
     unittest.main()

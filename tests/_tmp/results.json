@@ -1,0 +1,18 @@
+{
+  "algorithm": "DijkstraRouting",
+  "execution_time": 0.01,
+  "successful_routes": 4,
+  "total_flows": 5,
+  "packet_delivery_ratio": 0.8,
+  "average_latency": 2.5,
+  "average_throughput": 50.0,
+  "average_hop_count": 2.0,
+  "congestion_simulated": true,
+  "paths": [
+    [
+      0,
+      1,
+      2
+    ]
+  ]
+}

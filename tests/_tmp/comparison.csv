@@ -1,0 +1,3 @@
+algorithm,execution_time,successful_routes,total_flows,packet_delivery_ratio,average_latency,average_throughput,average_hop_count,congestion_simulated,algorithm_label
+DijkstraRouting,0.01,4,5,0.8,2.5,50.0,2.0,True,Dijkstra
+BellmanFordRouting,0.02,5,5,1.0,3.0,40.0,2.2,True,Bellman-Ford

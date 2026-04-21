@@ -1,482 +1,1202 @@
-import sys
+import base64
+import json
+import math
 import os
+import sys
 
-# Ensure project root is on sys.path regardless of where this file is run from
+import dash
+from dash import Input, Output, State, dcc, html
+import networkx as nx
+import plotly.graph_objs as go
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import dash
-from dash import dcc, html, Input, Output, State
-import plotly.graph_objs as go
-import networkx as nx
-
-from src.network.topology import NetworkTopology
 from src.algorithms.routing import create_routing_algorithm
-from src.traffic.generator import TrafficGenerator
 from src.metrics.analyzer import PerformanceMetrics
+from src.network.topology import NetworkTopology
+from src.planning.recommendations import build_recommendations
+from src.reporting.exporter import export_simulation_bundle
+from src.traffic.generator import TrafficGenerator
 
-# ── App init ─────────────────────────────────────────────────────────────────
+
 app = dash.Dash(__name__)
 
-current_network = None
+COLORS = {
+    "bg": "#f4efe5",
+    "bg_accent": "#efe5d3",
+    "surface": "#fffaf2",
+    "surface_alt": "#f8f1e4",
+    "ink": "#1f2933",
+    "muted": "#62707c",
+    "line": "#d8c7ab",
+    "primary": "#0e7490",
+    "primary_dark": "#155e75",
+    "success": "#2e7d32",
+    "warning": "#f59e0b",
+    "danger": "#c2410c",
+    "danger_dark": "#9a3412",
+    "low": "#a8b5c2",
+    "medium": "#f2c14e",
+    "heavy": "#f08c2e",
+    "overload": "#c2410c",
+}
 
-# ── Styles ────────────────────────────────────────────────────────────────────
-CARD  = {'background': '#f9f9f9', 'border': '1px solid #ddd', 'borderRadius': '8px',
-         'padding': '16px', 'marginBottom': '16px'}
-LABEL = {'fontWeight': 'bold', 'marginTop': '10px', 'display': 'block'}
-INPUT = {'width': '100%', 'padding': '6px', 'boxSizing': 'border-box', 'marginTop': '4px'}
-BTN   = {'marginTop': '14px', 'width': '100%', 'padding': '10px', 'background': '#2c7be5',
-         'color': 'white', 'border': 'none', 'borderRadius': '6px', 'cursor': 'pointer',
-         'fontWeight': 'bold', 'fontSize': '14px'}
-TH    = {'border': '1px solid #ccc', 'padding': '8px', 'background': '#eef2f7', 'textAlign': 'left'}
-TD    = {'border': '1px solid #ccc', 'padding': '8px'}
+FONT_STACK = "Georgia, Cambria, 'Times New Roman', serif"
+SANS_STACK = "'Trebuchet MS', 'Segoe UI', sans-serif"
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-app.layout = html.Div(
-    style={'fontFamily': 'Arial, sans-serif', 'maxWidth': '1400px',
-           'margin': '0 auto', 'padding': '20px'},
-    children=[
-
-        html.H1("Network Routing Algorithm Analyzer",
-                style={'textAlign': 'center', 'color': '#1a1a2e', 'marginBottom': '24px'}),
-
-        # ── Row 1: three config cards ────────────────────────────────────────
-        html.Div(style={'display': 'flex', 'gap': '16px', 'flexWrap': 'wrap'}, children=[
-
-            # Card 1 – Network
-            html.Div(style={**CARD, 'flex': '1', 'minWidth': '260px'}, children=[
-                html.H3("① Network Configuration", style={'marginTop': 0}),
-
-                html.Label("Topology Type", style=LABEL),
-                dcc.Dropdown(
-                    id='topology-type',
-                    options=[
-                        {'label': 'Mesh (fully connected)', 'value': 'mesh'},
-                        {'label': 'Random (Erdős–Rényi)',   'value': 'random'},
-                        {'label': 'Ring',                   'value': 'ring'},
-                        {'label': 'Star',                   'value': 'star'},
-                    ],
-                    value='random',
-                    clearable=False,
-                ),
-
-                html.Label("Number of Nodes (10 – 200)", style=LABEL),
-                dcc.Input(id='node-count', type='number', value=20,
-                          min=10, max=200, step=1, style=INPUT),
-
-                # Edge probability – only relevant for random topology
-                html.Div(id='edge-prob-container', children=[
-                    html.Label("Edge Probability (0.1 – 0.8)", style=LABEL),
-                    dcc.Input(id='edge-prob', type='number', value=0.3,
-                              min=0.1, max=0.8, step=0.05, style=INPUT),
-                ]),
-
-                html.Button('Generate Network', id='generate-network', n_clicks=0, style=BTN),
-                html.Div(id='network-status',
-                         style={'marginTop': '8px', 'color': '#555', 'fontSize': '13px'}),
-            ]),
-
-            # Card 2 – Traffic
-            html.Div(style={**CARD, 'flex': '1', 'minWidth': '260px'}, children=[
-                html.H3("② Traffic Configuration", style={'marginTop': 0}),
-
-                html.Label("Traffic Intensity", style=LABEL),
-                dcc.Dropdown(
-                    id='traffic-intensity',
-                    options=[
-                        {'label': 'Low  (10 flows)',    'value': 'low'},
-                        {'label': 'Medium  (20 flows)', 'value': 'medium'},
-                        {'label': 'High  (40 flows)',   'value': 'high'},
-                        {'label': 'Custom',             'value': 'custom'},
-                    ],
-                    value='medium',
-                    clearable=False,
-                ),
-
-                # Custom flow count – shown only when Custom is selected
-                html.Div(id='custom-flow-container', style={'display': 'none'}, children=[
-                    html.Label("Number of Flows (1 – 100)", style=LABEL),
-                    dcc.Input(id='flow-count', type='number', value=20,
-                              min=1, max=100, step=1, style=INPUT),
-                ]),
-
-                html.Label("Congestion Simulation", style=LABEL),
-                html.Div(
-                    style={
-                        'display': 'flex', 'alignItems': 'center', 'gap': '10px',
-                        'marginTop': '6px', 'marginBottom': '4px',
-                    },
-                    children=[
-                        # Toggle switch built from a Checklist
-                        dcc.Checklist(
-                            id='congestion-mode',
-                            options=[{'label': '', 'value': 'on'}],
-                            value=['on'],
-                            inputStyle={
-                                'width': '36px', 'height': '20px', 'cursor': 'pointer',
-                                'accentColor': '#2c7be5',
-                            },
-                        ),
-                        html.Span(
-                            id='congestion-toggle-label',
-                            style={'fontSize': '13px', 'fontWeight': 'bold', 'color': '#2c7be5'},
-                            children='ON',
-                        ),
-                    ],
-                ),
-                html.Div(
-                    id='congestion-info',
-                    style={'fontSize': '11px', 'color': '#2c7be5', 'marginTop': '4px',
-                           'fontStyle': 'italic', 'padding': '6px 8px',
-                           'background': '#eef4ff', 'borderRadius': '4px',
-                           'borderLeft': '3px solid #2c7be5'},
-                    children="Active: each flow degrades edges it uses (+25% weight). "
-                             "Edges used by 3+ flows risk 30% packet drop.",
-                ),
-            ]),
-
-            # Card 3 – Algorithm
-            html.Div(style={**CARD, 'flex': '1', 'minWidth': '260px'}, children=[
-                html.H3("③ Routing Algorithm", style={'marginTop': 0}),
-
-                html.Label("Algorithm", style=LABEL),
-                dcc.Dropdown(
-                    id='algorithm-type',
-                    options=[
-                        {'label': 'Dijkstra (shortest path)',       'value': 'dijkstra'},
-                        {'label': 'Bellman-Ford (distributed SP)',  'value': 'bellman_ford'},
-                        {'label': 'ACO (Ant Colony Optimization)',  'value': 'aco'},
-                        {'label': 'GA (Genetic Algorithm)',         'value': 'ga'},
-                        {'label': 'ALL – compare every algorithm',  'value': 'all'},
-                    ],
-                    value='dijkstra',
-                    clearable=False,
-                ),
-
-                html.Button('Run Simulation', id='run-simulation', n_clicks=0, style=BTN),
-            ]),
-        ]),
-
-        html.Hr(),
-
-        # ── Row 2: graph + metrics ───────────────────────────────────────────
-        html.Div(style={'display': 'flex', 'gap': '16px', 'flexWrap': 'wrap'}, children=[
-
-            html.Div(style={**CARD, 'flex': '1.2', 'minWidth': '340px'}, children=[
-                html.H3("Network Topology", style={'marginTop': 0}),
-                dcc.Graph(id='network-graph', style={'height': '420px'}),
-            ]),
-
-            html.Div(style={**CARD, 'flex': '0.8', 'minWidth': '280px'}, children=[
-                html.H3("Performance Metrics", style={'marginTop': 0}),
-                html.Div(id='metrics-display', style={'fontSize': '14px'}),
-                html.H3("Sample Paths", style={'marginTop': '16px'}),
-                html.Div(id='paths-display', style={'fontSize': '13px'}),
-            ]),
-        ]),
-
-        html.Hr(),
-
-        # ── Row 3: comparison table ──────────────────────────────────────────
-        html.Div(style=CARD, children=[
-            html.H3("Algorithm Comparison", style={'marginTop': 0}),
-            html.Div(id='comparison-results', style={'fontSize': '14px'}),
-        ]),
-    ],
-)
+CARD = {
+    "background": COLORS["surface"],
+    "border": f"1px solid {COLORS['line']}",
+    "borderRadius": "22px",
+    "padding": "20px",
+    "boxShadow": "0 14px 34px rgba(120, 90, 40, 0.08)",
+}
+LABEL = {
+    "fontWeight": "bold",
+    "marginTop": "12px",
+    "display": "block",
+    "fontFamily": SANS_STACK,
+    "fontSize": "13px",
+    "letterSpacing": "0.04em",
+    "textTransform": "uppercase",
+    "color": COLORS["muted"],
+}
+INPUT_STYLE = {
+    "width": "100%",
+    "padding": "10px 12px",
+    "boxSizing": "border-box",
+    "marginTop": "6px",
+    "borderRadius": "12px",
+    "border": f"1px solid {COLORS['line']}",
+    "background": "white",
+    "color": COLORS["ink"],
+}
+BUTTON_STYLE = {
+    "marginTop": "16px",
+    "width": "100%",
+    "padding": "12px 14px",
+    "background": f"linear-gradient(135deg, {COLORS['primary']}, {COLORS['primary_dark']})",
+    "color": "white",
+    "border": "none",
+    "borderRadius": "999px",
+    "cursor": "pointer",
+    "fontWeight": "bold",
+    "fontSize": "14px",
+    "letterSpacing": "0.02em",
+    "boxShadow": "0 10px 24px rgba(14, 116, 144, 0.22)",
+}
+TH = {
+    "borderBottom": f"1px solid {COLORS['line']}",
+    "padding": "10px 8px",
+    "background": COLORS["surface_alt"],
+    "textAlign": "left",
+    "fontFamily": SANS_STACK,
+    "fontSize": "12px",
+    "textTransform": "uppercase",
+    "letterSpacing": "0.04em",
+    "color": COLORS["muted"],
+}
+TD = {
+    "borderBottom": f"1px solid rgba(216, 199, 171, 0.55)",
+    "padding": "10px 8px",
+    "color": COLORS["ink"],
+}
 
 
-# ── Callbacks ─────────────────────────────────────────────────────────────────
-
-@app.callback(
-    Output('edge-prob-container', 'style'),
-    Input('topology-type', 'value'),
-)
-def toggle_edge_prob(topology):
-    return {'display': 'block'} if topology == 'random' else {'display': 'none'}
+def _offset_seed(seed, offset):
+    return None if seed is None else seed + offset
 
 
-@app.callback(
-    Output('custom-flow-container', 'style'),
-    Input('traffic-intensity', 'value'),
-)
-def toggle_custom_flows(intensity):
-    return {'display': 'block'} if intensity == 'custom' else {'display': 'none'}
+def metric_chip(title, value, accent):
+    return html.Div(
+        style={
+            "background": "white",
+            "border": f"1px solid {COLORS['line']}",
+            "borderTop": f"4px solid {accent}",
+            "borderRadius": "16px",
+            "padding": "12px 14px",
+            "minWidth": "120px",
+        },
+        children=[
+            html.Div(title, style={"fontFamily": SANS_STACK, "fontSize": "11px", "color": COLORS["muted"], "textTransform": "uppercase", "letterSpacing": "0.05em"}),
+            html.Div(value, style={"fontFamily": FONT_STACK, "fontSize": "24px", "color": COLORS["ink"], "marginTop": "6px", "fontWeight": "bold"}),
+        ],
+    )
 
 
-@app.callback(
-    Output('congestion-toggle-label', 'children'),
-    Output('congestion-toggle-label', 'style'),
-    Output('congestion-info', 'children'),
-    Output('congestion-info', 'style'),
-    Input('congestion-mode', 'value'),
-)
-def update_congestion_ui(value):
-    is_on = bool(value)  # Checklist returns [] when unchecked, ['on'] when checked
-    if is_on:
-        label       = 'ON'
-        label_style = {'fontSize': '13px', 'fontWeight': 'bold', 'color': '#2c7be5'}
-        info_text   = ("Active: each flow degrades edges it uses (+25% weight). "
-                       "Edges used by 3+ flows risk 30% packet drop.")
-        info_style  = {
-            'fontSize': '11px', 'color': '#2c7be5', 'marginTop': '4px',
-            'fontStyle': 'italic', 'padding': '6px 8px',
-            'background': '#eef4ff', 'borderRadius': '4px',
-            'borderLeft': '3px solid #2c7be5',
-        }
+def panel_heading(title, subtitle=None):
+    children = [
+        html.H3(title, style={"margin": "0", "fontFamily": FONT_STACK, "fontSize": "28px", "color": COLORS["ink"]}),
+    ]
+    if subtitle:
+        children.append(html.P(subtitle, style={"margin": "6px 0 0", "color": COLORS["muted"], "fontFamily": SANS_STACK, "fontSize": "14px"}))
+    return html.Div(children=children, style={"marginBottom": "14px"})
+
+
+def empty_figure(message="Generate or import a network to begin"):
+    return go.Figure(
+        layout=go.Layout(
+            title=dict(text=message, font=dict(family=FONT_STACK, size=22, color=COLORS["ink"])),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            margin=dict(b=10, l=5, r=5, t=60),
+        )
+    )
+
+
+def edge_style(stress_score):
+    if stress_score >= 0.85:
+        return COLORS["overload"], 5.2
+    if stress_score >= 0.6:
+        return COLORS["heavy"], 4.3
+    if stress_score >= 0.3:
+        return COLORS["medium"], 3.2
+    return COLORS["low"], 1.8
+
+
+def display_stress_score(load_ratio, max_load_ratio):
+    if load_ratio <= 0:
+        return 0.0
+
+    capped_max = max(1.0, float(max_load_ratio or 0.0))
+    # Compress very large overload values so the graph shows a useful spread
+    # instead of collapsing into only gray and red.
+    return min(1.0, math.log1p(load_ratio) / math.log1p(capped_max))
+
+
+def parse_number(value):
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def parse_node_list(text):
+    nodes = []
+    for chunk in (text or "").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        nodes.append(parse_number(item))
+    return nodes
+
+
+def parse_edge_pairs(text):
+    edges = []
+    for chunk in (text or "").split(","):
+        item = chunk.strip()
+        if "-" not in item:
+            continue
+        left, right = [part.strip() for part in item.split("-", 1)]
+        edges.append((parse_number(left), parse_number(right)))
+    return edges
+
+
+def parse_scored_edges(text):
+    values = {}
+    for chunk in (text or "").split(","):
+        item = chunk.strip()
+        if ":" not in item or "-" not in item:
+            continue
+        edge_text, value_text = [part.strip() for part in item.split(":", 1)]
+        left, right = [part.strip() for part in edge_text.split("-", 1)]
+        try:
+            values[(parse_number(left), parse_number(right))] = float(value_text)
+        except ValueError:
+            continue
+    return values
+
+
+def parse_node_scores(text):
+    values = {}
+    for chunk in (text or "").split(","):
+        item = chunk.strip()
+        if ":" not in item:
+            continue
+        node_text, value_text = [part.strip() for part in item.split(":", 1)]
+        try:
+            values[parse_number(node_text)] = float(value_text)
+        except ValueError:
+            continue
+    return values
+
+
+def build_manual_failure_profile(down_nodes, down_edges, packet_loss_edges, packet_loss_nodes, maintenance_edges):
+    return {
+        "down_nodes": parse_node_list(down_nodes),
+        "down_edges": parse_edge_pairs(down_edges),
+        "packet_loss_edges": parse_scored_edges(packet_loss_edges),
+        "packet_loss_nodes": parse_node_scores(packet_loss_nodes),
+        "maintenance_edges": parse_scored_edges(maintenance_edges),
+    }
+
+
+def _decode_upload(contents):
+    _, content_string = contents.split(",", 1)
+    decoded = base64.b64decode(content_string)
+    return decoded.decode("utf-8")
+
+
+def _csv_records(text):
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    header = [item.strip() for item in lines[0].split(",")]
+    records = []
+    for line in lines[1:]:
+        parts = [item.strip() for item in line.split(",")]
+        records.append(dict(zip(header, parts)))
+    return records
+
+
+def merge_import_records(files):
+    merged = {"nodes": [], "edges": [], "flows": []}
+    notes = []
+
+    for file_name, contents in files:
+        text = _decode_upload(contents)
+        lower_name = file_name.lower()
+        if lower_name.endswith(".json"):
+            payload = json.loads(text)
+            merged["nodes"].extend(payload.get("nodes", []))
+            merged["edges"].extend(payload.get("edges", []))
+            merged["flows"].extend(payload.get("flows", payload.get("traffic_matrix", [])))
+            notes.append(f"{file_name}: JSON scenario loaded")
+            continue
+
+        records = _csv_records(text)
+        if not records:
+            continue
+        columns = set(records[0].keys())
+        if {"source", "target"} <= columns:
+            merged["edges"].extend(records)
+            notes.append(f"{file_name}: edge list loaded")
+        elif {"source", "destination"} <= columns:
+            merged["flows"].extend(records)
+            notes.append(f"{file_name}: traffic data loaded")
+        elif {"id"} <= columns or {"node_id"} <= columns:
+            merged["nodes"].extend(records)
+            notes.append(f"{file_name}: node list loaded")
+
+    return merged, notes
+
+
+def build_network(topology_type, node_count, edge_prob, seed, import_data=None, failure_profile=None):
+    network = NetworkTopology(seed=seed)
+    if import_data and import_data.get("edges"):
+        network.load_from_data(import_data.get("nodes"), import_data.get("edges"), seed=seed)
     else:
-        label       = 'OFF'
-        label_style = {'fontSize': '13px', 'fontWeight': 'bold', 'color': '#888'}
-        info_text   = "Disabled: classic static routing — no edge degradation or packet drops."
-        info_style  = {
-            'fontSize': '11px', 'color': '#888', 'marginTop': '4px',
-            'fontStyle': 'italic', 'padding': '6px 8px',
-            'background': '#f5f5f5', 'borderRadius': '4px',
-            'borderLeft': '3px solid #ccc',
+        builders = {
+            "mesh": lambda: network.create_mesh_topology(node_count, seed=seed),
+            "random": lambda: network.create_random_topology(node_count, edge_prob, seed=seed),
+            "ring": lambda: network.create_ring_topology(node_count, seed=seed),
+            "star": lambda: network.create_star_topology(node_count, seed=seed),
         }
-    return label, label_style, info_text, info_style
+        builders[topology_type]()
+
+    network.apply_failure_profile(failure_profile or {})
+    return network
 
 
-@app.callback(
-    Output('network-graph',  'figure'),
-    Output('network-status', 'children'),
-    Input('generate-network', 'n_clicks'),
-    State('topology-type', 'value'),
-    State('node-count',    'value'),
-    State('edge-prob',     'value'),
-    prevent_initial_call=True,
-)
-def update_network_graph(n_clicks, topology_type, node_count, edge_prob):
-    global current_network
+def merge_failure_profiles(*profiles):
+    merged = {
+        "down_nodes": [],
+        "down_edges": [],
+        "packet_loss_nodes": {},
+        "packet_loss_edges": {},
+        "maintenance_edges": {},
+    }
 
-    node_count = int(node_count or 20)
-    edge_prob  = float(edge_prob  or 0.3)
+    for profile in profiles:
+        if not profile:
+            continue
+        merged["down_nodes"].extend(profile.get("down_nodes", []))
+        merged["down_edges"].extend(profile.get("down_edges", []))
+        merged["packet_loss_nodes"].update(profile.get("packet_loss_nodes", {}))
+        merged["packet_loss_edges"].update(profile.get("packet_loss_edges", {}))
+        merged["maintenance_edges"].update(profile.get("maintenance_edges", {}))
 
-    current_network = NetworkTopology()
-    if topology_type == 'mesh':
-        current_network.create_mesh_topology(node_count)
-    elif topology_type == 'random':
-        current_network.create_random_topology(node_count, edge_prob)
-    elif topology_type == 'ring':
-        current_network.create_ring_topology(node_count)
-    elif topology_type == 'star':
-        current_network.create_star_topology(node_count)
+    merged["down_nodes"] = list(dict.fromkeys(merged["down_nodes"]))
+    merged["down_edges"] = list(dict.fromkeys((min(u, v), max(u, v)) for u, v in merged["down_edges"]))
+    return merged
 
-    G   = current_network.graph
-    pos = nx.spring_layout(G, seed=42)
 
-    edge_x, edge_y = [], []
-    for u, v in G.edges():
-        x0, y0 = pos[u]; x1, y1 = pos[v]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
+def create_algorithms(network, base_seed):
+    return {
+        "Dijkstra": create_routing_algorithm("dijkstra", network, seed=_offset_seed(base_seed, 0)),
+        "Bellman-Ford": create_routing_algorithm("bellman_ford", network, seed=_offset_seed(base_seed, 1)),
+        "ACO": create_routing_algorithm("aco", network, seed=_offset_seed(base_seed, 2)),
+        "GA": create_routing_algorithm("ga", network, seed=_offset_seed(base_seed, 3)),
+    }
 
-    edge_trace = go.Scatter(
-        x=edge_x, y=edge_y, mode='lines',
-        line=dict(width=1.5, color='#aaa'), hoverinfo='none',
+
+def build_network_figure(network, title_label, node_count, simulation_state=None):
+    if network is None or network.graph.number_of_nodes() == 0:
+        return empty_figure()
+
+    graph = network.graph
+    pos = nx.spring_layout(graph, seed=42)
+    edge_loads = simulation_state.get("edge_loads", {}) if simulation_state else {}
+    max_load_ratio = max(
+        (edge.get("load_ratio", 0) for edge in edge_loads.values()),
+        default=0,
+    )
+    traces = []
+    hover_x = []
+    hover_y = []
+    hover_texts = []
+
+    for u, v in graph.edges():
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        edge_key = f"{min(u, v)}-{max(u, v)}"
+        edge_data = edge_loads.get(edge_key, {})
+        load_ratio = edge_data.get("load_ratio", 0)
+        bandwidth = edge_data.get("bandwidth", graph[u][v].get("bandwidth", 0))
+        stress_score = display_stress_score(load_ratio, max_load_ratio)
+        color, width = edge_style(stress_score)
+        hover_text = (
+            f"<b>Edge {u}-{v}</b><br>"
+            f"Current weight: {graph[u][v].get('weight', 1):.2f}<br>"
+            f"Bandwidth: {bandwidth}<br>"
+            f"Load ratio: {load_ratio:.2f}<br>"
+            f"Display stress: {stress_score:.2f}<br>"
+            f"Packet loss: {graph[u][v].get('packet_loss', 0):.2f}"
+        )
+        traces.append(
+            go.Scatter(
+                x=[x0, x1, None],
+                y=[y0, y1, None],
+                mode="lines",
+                line=dict(width=width, color=color),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        hover_x.append((x0 + x1) / 2)
+        hover_y.append((y0 + y1) / 2)
+        hover_texts.append(hover_text)
+
+    traces.append(
+        go.Scatter(
+            x=hover_x,
+            y=hover_y,
+            mode="markers",
+            marker=dict(size=18, color="rgba(0,0,0,0)"),
+            hovertemplate="%{text}<extra></extra>",
+            text=hover_texts,
+            showlegend=False,
+        )
     )
 
     show_labels = node_count <= 30
-    node_trace = go.Scatter(
-        x=[pos[n][0] for n in G.nodes()],
-        y=[pos[n][1] for n in G.nodes()],
-        mode='markers+text' if show_labels else 'markers',
-        text=[f'Node {n}' for n in G.nodes()],
-        textposition='middle center',
-        hoverinfo='text',
-        marker=dict(
-            size=14 if show_labels else 8,
-            color='#5b8dee',
-            line=dict(width=2, color='#1a4fa0'),
-        ),
+    traces.append(
+        go.Scatter(
+            x=[pos[node][0] for node in graph.nodes()],
+            y=[pos[node][1] for node in graph.nodes()],
+            mode="markers+text" if show_labels else "markers",
+            text=[f"{node}" for node in graph.nodes()],
+            textposition="middle center",
+            hovertemplate="Node %{text}<extra></extra>",
+            marker=dict(
+                size=18 if show_labels else 10,
+                color=COLORS["primary"],
+                line=dict(width=2, color=COLORS["primary_dark"]),
+            ),
+            textfont=dict(family=SANS_STACK, color="white", size=11),
+            showlegend=False,
+        )
     )
 
-    fig = go.Figure(
-        data=[edge_trace, node_trace],
+    title = title_label
+    if simulation_state and simulation_state.get("mode") == "single":
+        title += f" | {simulation_state.get('algorithm_label', 'Simulation')} overlay"
+    elif simulation_state and simulation_state.get("mode") == "all":
+        title += " | comparison mode"
+
+    return go.Figure(
+        data=traces,
         layout=go.Layout(
-            title=f'{topology_type.capitalize()} – {G.number_of_nodes()} nodes, '
-                  f'{G.number_of_edges()} edges',
-            showlegend=False, hovermode='closest',
-            margin=dict(b=10, l=5, r=5, t=40),
+            title=dict(text=title, font=dict(family=FONT_STACK, size=24, color=COLORS["ink"])),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+            hovermode="closest",
+            margin=dict(b=10, l=5, r=5, t=60),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         ),
     )
 
-    status = (f"✔ Network ready — {G.number_of_nodes()} nodes, "
-              f"{G.number_of_edges()} edges"
-              + (f", edge prob {edge_prob}" if topology_type == 'random' else ""))
-    return fig, status
+
+def build_link_stress_legend():
+    items = [
+        ("Lowest stress in this run stays gray", COLORS["low"]),
+        ("Moderate stress turns yellow", COLORS["medium"]),
+        ("Heavy stress turns orange", COLORS["heavy"]),
+        ("Highest stress turns red", COLORS["overload"]),
+    ]
+    return html.Div(
+        style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(170px, 1fr))", "gap": "10px", "marginTop": "10px"},
+        children=[
+            html.Div(
+                style={"display": "flex", "alignItems": "center", "gap": "10px", "background": "white", "border": f"1px solid {COLORS['line']}", "borderRadius": "999px", "padding": "8px 12px"},
+                children=[
+                    html.Span(style={"display": "inline-block", "width": "18px", "height": "6px", "borderRadius": "999px", "background": color}),
+                    html.Span(label, style={"fontFamily": SANS_STACK, "fontSize": "12px", "color": COLORS["muted"]}),
+                ],
+            )
+            for label, color in items
+        ],
+    )
+
+
+def build_edge_load_panel(simulation_state):
+    edge_loads = simulation_state.get("edge_loads", {})
+    if not edge_loads:
+        return html.P("Run a single algorithm to inspect stressed links.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
+
+    sorted_edges = sorted(edge_loads.values(), key=lambda item: item["load_ratio"], reverse=True)[:8]
+    header = html.Thead(html.Tr([html.Th(col, style=TH) for col in ["Edge", "Load", "Bandwidth", "Load Ratio", "Weight"]]))
+    rows = []
+    for edge in sorted_edges:
+        row_style = {**TD}
+        if edge["load_ratio"] >= 1.0:
+            row_style = {**TD, "background": "#fff1ea"}
+        elif edge["load_ratio"] >= 0.75:
+            row_style = {**TD, "background": "#fff6e5"}
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(f"{edge['u']} - {edge['v']}", style=row_style),
+                    html.Td(f"{edge['load']}", style=row_style),
+                    html.Td(f"{edge['bandwidth']}", style=row_style),
+                    html.Td(f"{edge['load_ratio']:.2f}", style=row_style),
+                    html.Td(f"{edge['weight']:.2f}", style=row_style),
+                ]
+            )
+        )
+
+    return html.Div(
+        children=[
+            html.Div("Hot Links", style={"fontFamily": FONT_STACK, "fontSize": "24px", "margin": "20px 0 8px", "color": COLORS["ink"]}),
+            html.Table([header, html.Tbody(rows)], style={"width": "100%", "borderCollapse": "collapse", "background": "white", "borderRadius": "14px", "overflow": "hidden"}),
+        ]
+    )
+
+
+def build_flow_details_panel(flow_details):
+    if not flow_details:
+        return html.P("No flow details available yet.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
+
+    header = html.Thead(html.Tr([html.Th(col, style=TH) for col in ["Flow", "Size", "Status", "Latency", "Throughput", "Path"]]))
+    rows = []
+    for flow in flow_details[:8]:
+        status_style = {**TD, "background": "#edf8ed", "color": COLORS["success"], "fontWeight": "bold"} if flow["delivered"] else {**TD, "background": "#fff1ea", "color": COLORS["danger_dark"], "fontWeight": "bold"}
+        path_text = " -> ".join(map(str, flow["path"])) if flow["path"] else "No path"
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(f"{flow['source']} to {flow['destination']}", style=TD),
+                    html.Td(f"{flow['packet_size']} KB", style=TD),
+                    html.Td("Delivered" if flow["delivered"] else "Dropped", style=status_style),
+                    html.Td("-" if flow["latency"] is None else f"{flow['latency']:.2f}", style=TD),
+                    html.Td("-" if flow["throughput"] is None else f"{flow['throughput']:.2f}", style=TD),
+                    html.Td(path_text, style=TD),
+                ]
+            )
+        )
+
+    return html.Div(
+        children=[
+            html.P(f"Showing the first {min(8, len(flow_details))} of {len(flow_details)} traffic flows.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK, "fontSize": "13px"}),
+            html.Table([header, html.Tbody(rows)], style={"width": "100%", "borderCollapse": "collapse", "background": "white", "borderRadius": "14px", "overflow": "hidden"}),
+        ]
+    )
+
+
+def build_metrics_panel(results, seed):
+    return html.Div(
+        children=[
+            html.Div(
+                style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(120px, 1fr))", "gap": "12px", "marginBottom": "16px"},
+                children=[
+                    metric_chip("Algorithm", results["algorithm"].replace("Routing", ""), COLORS["primary"]),
+                    metric_chip("PDR", f"{results['packet_delivery_ratio']:.0%}", COLORS["success"]),
+                    metric_chip("Latency", f"{results['average_latency']:.2f}", COLORS["warning"]),
+                    metric_chip("Max Util", f"{results['max_utilization']:.2f}", COLORS["danger"]),
+                ],
+            ),
+            html.Table(
+                [html.Tbody([
+                    html.Tr([html.Td("Execution Time", style=TH), html.Td(f"{results['execution_time']:.4f} s", style=TD)]),
+                    html.Tr([html.Td("Successful Routes", style=TH), html.Td(f"{results['successful_routes']} / {results['total_flows']}", style=TD)]),
+                    html.Tr([html.Td("Dropped Flows", style=TH), html.Td(f"{results['dropped_flows']}", style=TD)]),
+                    html.Tr([html.Td("Average Throughput", style=TH), html.Td(f"{results['average_throughput']:.2f}", style=TD)]),
+                    html.Tr([html.Td("Average Hop Count", style=TH), html.Td(f"{results['average_hop_count']:.2f}", style=TD)]),
+                    html.Tr([html.Td("Congested Edges", style=TH), html.Td(f"{results['congested_edges']}", style=TD)]),
+                    html.Tr([html.Td("Seed", style=TH), html.Td(seed if seed is not None else "random", style=TD)]),
+                ])],
+                style={"width": "100%", "borderCollapse": "collapse", "background": "white", "borderRadius": "14px", "overflow": "hidden"},
+            ),
+        ]
+    )
+
+
+def build_comparison_panel(simulation_state):
+    comparison = simulation_state.get("comparison", {})
+    scores = simulation_state.get("scores", {})
+    if not comparison:
+        return html.P("Select ALL to compare every algorithm.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
+
+    ranking = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_name = ranking[0][0]
+    header = html.Thead(html.Tr([html.Th(column, style=TH) for column in ["Algorithm", "Score", "PDR", "Latency", "Throughput", "Max Util"]]))
+    rows = []
+    for name, score in ranking:
+        metrics = comparison[name]
+        style = {**TD}
+        if name == best_name:
+            style = {**TD, "background": "#edf8ed", "fontWeight": "bold"}
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(name, style=style),
+                    html.Td(f"{score:.4f}", style=style),
+                    html.Td(f"{metrics['packet_delivery_ratio']:.2%}", style=style),
+                    html.Td(f"{metrics['average_latency']:.2f}", style=style),
+                    html.Td(f"{metrics['average_throughput']:.2f}", style=style),
+                    html.Td(f"{metrics['max_utilization']:.2f}", style=style),
+                ]
+            )
+        )
+
+    return html.Div(
+        children=[
+            html.Div(
+                style={"display": "inline-block", "padding": "10px 14px", "borderRadius": "999px", "background": "#edf8ed", "color": COLORS["success"], "fontFamily": SANS_STACK, "fontWeight": "bold", "marginBottom": "12px"},
+                children=f"Best overall: {best_name} ({scores[best_name]:.4f})",
+            ),
+            html.Table([header, html.Tbody(rows)], style={"width": "100%", "borderCollapse": "collapse", "background": "white", "borderRadius": "14px", "overflow": "hidden"}),
+        ]
+    )
+
+
+def build_recommendations_panel(recommendations, report_state):
+    if not recommendations:
+        recommendations = [{"priority": "low", "title": "Run a scenario", "detail": "Recommendations appear after you simulate a real or generated network."}]
+
+    cards = []
+    for item in recommendations:
+        border = COLORS["success"] if item["priority"] == "low" else COLORS["warning"] if item["priority"] == "medium" else COLORS["danger"]
+        cards.append(
+            html.Div(
+                style={"background": "white", "borderLeft": f"4px solid {border}", "borderRadius": "14px", "padding": "12px 14px", "marginBottom": "10px"},
+                children=[
+                    html.Div(item["title"], style={"fontFamily": SANS_STACK, "fontWeight": "bold", "color": COLORS["ink"]}),
+                    html.P(item["detail"], style={"margin": "6px 0 0", "fontFamily": SANS_STACK, "fontSize": "13px", "color": COLORS["muted"]}),
+                ],
+            )
+        )
+
+    export_note = html.P("Export a report after running a scenario.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK, "fontSize": "13px"})
+    if report_state:
+        export_note = html.Div(
+            [
+                html.Div("Reports written to:", style={"fontFamily": SANS_STACK, "fontWeight": "bold", "marginBottom": "6px"}),
+                html.Div(report_state["csv_path"], style={"fontFamily": SANS_STACK, "fontSize": "12px"}),
+                html.Div(report_state["pdf_path"], style={"fontFamily": SANS_STACK, "fontSize": "12px"}),
+            ],
+            style={"background": "#eef9fc", "borderRadius": "14px", "padding": "12px 14px", "marginTop": "12px", "color": COLORS["primary_dark"]},
+        )
+
+    return html.Div(cards + [export_note])
+
+
+app.layout = html.Div(
+    style={
+        "background": f"radial-gradient(circle at top left, {COLORS['bg_accent']} 0%, {COLORS['bg']} 42%, #f7f2ea 100%)",
+        "minHeight": "100vh",
+        "padding": "24px",
+        "color": COLORS["ink"],
+    },
+    children=[
+        dcc.Store(id="import-state"),
+        dcc.Store(id="network-state"),
+        dcc.Store(id="simulation-state"),
+        dcc.Store(id="report-state"),
+        html.Div(
+            style={"maxWidth": "1520px", "margin": "0 auto"},
+            children=[
+                html.Div(
+                    style={**CARD, "padding": "28px 28px 22px", "background": "linear-gradient(135deg, #fff8ee 0%, #f8efdf 100%)", "marginBottom": "18px"},
+                    children=[
+                        html.Div("Routing Simulator", style={"fontFamily": SANS_STACK, "fontSize": "12px", "textTransform": "uppercase", "letterSpacing": "0.16em", "color": COLORS["primary"]}),
+                        html.H1("Network Routing Command Deck", style={"fontFamily": FONT_STACK, "fontSize": "48px", "lineHeight": "1", "margin": "10px 0 10px", "color": COLORS["ink"]}),
+                        html.P(
+                            "Import a real scenario or generate one, inject failures, inspect capacity stress, and export a planning report.",
+                            style={"fontFamily": SANS_STACK, "fontSize": "17px", "color": COLORS["muted"], "maxWidth": "820px", "margin": "0"},
+                        ),
+                    ],
+                ),
+                html.Div(
+                    style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(280px, 1fr))", "gap": "16px", "marginBottom": "18px"},
+                    children=[
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Topology", "Upload a scenario or generate one from scratch."),
+                                dcc.Upload(
+                                    id="scenario-upload",
+                                    children=html.Div("Drop JSON/CSV files here or click to upload"),
+                                    multiple=True,
+                                    style={"width": "100%", "padding": "18px", "borderRadius": "16px", "border": f"2px dashed {COLORS['line']}", "textAlign": "center", "fontFamily": SANS_STACK, "color": COLORS["muted"], "background": "white"},
+                                ),
+                                html.Div(id="import-status", style={"marginTop": "10px", "fontFamily": SANS_STACK, "fontSize": "13px", "color": COLORS["muted"]}),
+                                html.Label("Topology Type", style=LABEL),
+                                dcc.Dropdown(
+                                    id="topology-type",
+                                    options=[
+                                        {"label": "Mesh (fully connected)", "value": "mesh"},
+                                        {"label": "Random (Erdos-Renyi)", "value": "random"},
+                                        {"label": "Ring", "value": "ring"},
+                                        {"label": "Star", "value": "star"},
+                                    ],
+                                    value="random",
+                                    clearable=False,
+                                    style={"marginTop": "6px"},
+                                ),
+                                html.Label("Number of Nodes", style=LABEL),
+                                dcc.Input(id="node-count", type="number", value=20, min=2, max=200, step=1, style=INPUT_STYLE),
+                                html.Div(
+                                    id="edge-prob-container",
+                                    children=[
+                                        html.Label("Edge Probability", style=LABEL),
+                                        dcc.Input(id="edge-prob", type="number", value=0.3, min=0.1, max=0.8, step=0.05, style=INPUT_STYLE),
+                                    ],
+                                ),
+                                html.Label("Random Seed", style=LABEL),
+                                dcc.Input(id="random-seed", type="number", value=42, step=1, style=INPUT_STYLE),
+                                html.Button("Build Scenario", id="generate-network", n_clicks=0, style=BUTTON_STYLE),
+                                html.Div(id="network-status", style={"marginTop": "12px", "fontFamily": SANS_STACK, "fontSize": "13px", "color": COLORS["muted"]}),
+                            ],
+                        ),
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Failures", "Model outages, packet-loss zones, and maintenance penalties."),
+                                html.Label("Failure Mode", style=LABEL),
+                                dcc.Checklist(
+                                    id="random-failure-mode",
+                                    options=[{"label": "Randomize failures from the current topology", "value": "on"}],
+                                    value=[],
+                                    style={"marginTop": "8px", "fontFamily": SANS_STACK, "color": COLORS["ink"]},
+                                ),
+                                html.Div(
+                                    id="random-failure-container",
+                                    style={"display": "none", "marginBottom": "12px"},
+                                    children=[
+                                        html.Label("Random Down Nodes", style=LABEL),
+                                        dcc.Input(id="random-down-node-count", type="number", value=0, min=0, step=1, style=INPUT_STYLE),
+                                        html.Label("Random Down Edges", style=LABEL),
+                                        dcc.Input(id="random-down-edge-count", type="number", value=0, min=0, step=1, style=INPUT_STYLE),
+                                        html.Label("Random Packet Loss Nodes", style=LABEL),
+                                        dcc.Input(id="random-loss-node-count", type="number", value=0, min=0, step=1, style=INPUT_STYLE),
+                                        html.Label("Random Packet Loss Edges", style=LABEL),
+                                        dcc.Input(id="random-loss-edge-count", type="number", value=0, min=0, step=1, style=INPUT_STYLE),
+                                        html.Label("Random Maintenance Edges", style=LABEL),
+                                        dcc.Input(id="random-maintenance-edge-count", type="number", value=0, min=0, step=1, style=INPUT_STYLE),
+                                        html.Label("Random Packet Loss Range", style=LABEL),
+                                        html.Div(
+                                            style={"display": "grid", "gridTemplateColumns": "repeat(2, minmax(0, 1fr))", "gap": "10px"},
+                                            children=[
+                                                dcc.Input(id="random-loss-min", type="number", value=0.1, min=0, max=1, step=0.05, style=INPUT_STYLE),
+                                                dcc.Input(id="random-loss-max", type="number", value=0.35, min=0, max=1, step=0.05, style=INPUT_STYLE),
+                                            ],
+                                        ),
+                                        html.Label("Random Maintenance Range", style=LABEL),
+                                        html.Div(
+                                            style={"display": "grid", "gridTemplateColumns": "repeat(2, minmax(0, 1fr))", "gap": "10px"},
+                                            children=[
+                                                dcc.Input(id="random-maintenance-min", type="number", value=1.25, min=1, step=0.05, style=INPUT_STYLE),
+                                                dcc.Input(id="random-maintenance-max", type="number", value=2.0, min=1, step=0.05, style=INPUT_STYLE),
+                                            ],
+                                        ),
+                                    ],
+                                ),
+                                html.Label("Down Nodes", style=LABEL),
+                                dcc.Input(id="down-nodes", type="text", placeholder="e.g. 3, 7", style=INPUT_STYLE),
+                                html.Label("Down Edges", style=LABEL),
+                                dcc.Input(id="down-edges", type="text", placeholder="e.g. 1-2, 3-4", style=INPUT_STYLE),
+                                html.Label("Packet Loss Edges", style=LABEL),
+                                dcc.Input(id="packet-loss-edges", type="text", placeholder="e.g. 2-4:0.25, 4-6:0.4", style=INPUT_STYLE),
+                                html.Label("Packet Loss Nodes", style=LABEL),
+                                dcc.Input(id="packet-loss-nodes", type="text", placeholder="e.g. 5:0.1, 8:0.2", style=INPUT_STYLE),
+                                html.Label("Maintenance Edges", style=LABEL),
+                                dcc.Input(id="maintenance-edges", type="text", placeholder="e.g. 1-3:1.8, 2-5:1.4", style=INPUT_STYLE),
+                            ],
+                        ),
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Traffic", "Tune traffic pressure and capacity-aware congestion behavior."),
+                                html.Label("Traffic Intensity", style=LABEL),
+                                dcc.Dropdown(
+                                    id="traffic-intensity",
+                                    options=[
+                                        {"label": "Low (10 flows)", "value": "low"},
+                                        {"label": "Medium (20 flows)", "value": "medium"},
+                                        {"label": "High (40 flows)", "value": "high"},
+                                        {"label": "Custom", "value": "custom"},
+                                    ],
+                                    value="medium",
+                                    clearable=False,
+                                    style={"marginTop": "6px"},
+                                ),
+                                html.Div(
+                                    id="custom-flow-container",
+                                    style={"display": "none"},
+                                    children=[
+                                        html.Label("Number of Flows", style=LABEL),
+                                        dcc.Input(id="flow-count", type="number", value=20, min=1, max=1000, step=1, style=INPUT_STYLE),
+                                    ],
+                                ),
+                                html.Label("Congestion Simulation", style=LABEL),
+                                html.Div(
+                                    style={"display": "flex", "alignItems": "center", "gap": "10px", "marginTop": "8px"},
+                                    children=[
+                                        dcc.Checklist(
+                                            id="congestion-mode",
+                                            options=[{"label": "", "value": "on"}],
+                                            value=["on"],
+                                            inputStyle={"width": "38px", "height": "22px", "cursor": "pointer", "accentColor": COLORS["primary"]},
+                                        ),
+                                        html.Span(id="congestion-toggle-label", style={"fontFamily": SANS_STACK, "fontSize": "13px", "fontWeight": "bold", "color": COLORS["primary"]}, children="ON"),
+                                    ],
+                                ),
+                                html.Div(
+                                    id="congestion-info",
+                                    style={"fontSize": "12px", "color": COLORS["primary_dark"], "marginTop": "10px", "fontFamily": SANS_STACK, "padding": "10px 12px", "background": "#eef9fc", "borderRadius": "14px", "borderLeft": f"4px solid {COLORS['primary']}"},
+                                    children="Active: link delay and drop risk scale with load relative to bandwidth, plus any packet-loss profile you apply.",
+                                ),
+                            ],
+                        ),
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Algorithms", "Run one strategy or compare the full set."),
+                                html.Label("Algorithm", style=LABEL),
+                                dcc.Dropdown(
+                                    id="algorithm-type",
+                                    options=[
+                                        {"label": "Dijkstra (shortest path)", "value": "dijkstra"},
+                                        {"label": "Bellman-Ford (distributed SP)", "value": "bellman_ford"},
+                                        {"label": "ACO (Ant Colony Optimization)", "value": "aco"},
+                                        {"label": "GA (Genetic Algorithm)", "value": "ga"},
+                                        {"label": "ALL - compare every algorithm", "value": "all"},
+                                    ],
+                                    value="dijkstra",
+                                    clearable=False,
+                                    style={"marginTop": "6px"},
+                                ),
+                                html.Div(
+                                    style={"display": "grid", "gridTemplateColumns": "repeat(2, minmax(0, 1fr))", "gap": "10px", "marginTop": "16px"},
+                                    children=[
+                                        metric_chip("Import", "JSON / CSV", COLORS["warning"]),
+                                        metric_chip("Export", "PDF / CSV", COLORS["primary"]),
+                                    ],
+                                ),
+                                html.Button("Run Simulation", id="run-simulation", n_clicks=0, style={**BUTTON_STYLE, "marginTop": "18px"}),
+                                html.Button("Export Report", id="export-report", n_clicks=0, style={**BUTTON_STYLE, "marginTop": "10px", "background": f"linear-gradient(135deg, {COLORS['danger']}, {COLORS['danger_dark']})"}),
+                            ],
+                        ),
+                    ],
+                ),
+                html.Div(
+                    style={"display": "grid", "gridTemplateColumns": "minmax(0, 1.35fr) minmax(340px, 0.9fr)", "gap": "16px", "marginBottom": "18px"},
+                    children=[
+                        html.Div(
+                            style={**CARD, "overflow": "hidden"},
+                            children=[
+                                panel_heading("Live Topology", "After a single algorithm run, the graph scales link stress from gray through red so overloaded runs still show useful differences."),
+                                dcc.Graph(id="network-graph", figure=empty_figure(), style={"height": "520px"}, config={"displayModeBar": False}),
+                                build_link_stress_legend(),
+                            ],
+                        ),
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Performance Readout", "The metrics update after each simulation run."),
+                                html.Div(id="metrics-display", style={"fontSize": "14px"}),
+                                html.Div(id="edge-load-display", style={"fontSize": "13px"}),
+                            ],
+                        ),
+                    ],
+                ),
+                html.Div(
+                    style={"display": "grid", "gridTemplateColumns": "repeat(3, minmax(0, 1fr))", "gap": "16px"},
+                    children=[
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Flow Narratives", "Inspect the first few traffic flows to see who gets through and who gets dropped."),
+                                html.Div(id="paths-display", style={"fontSize": "13px"}),
+                            ],
+                        ),
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Algorithm Comparison", "Use ALL mode to rank the routing strategies."),
+                                html.Div(id="comparison-results", style={"fontSize": "14px"}),
+                            ],
+                        ),
+                        html.Div(
+                            style=CARD,
+                            children=[
+                                panel_heading("Recommendations", "Turn raw metrics into practical next steps."),
+                                html.Div(id="recommendations-display", style={"fontSize": "14px"}),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)
 
 
 @app.callback(
-    Output('metrics-display',    'children'),
-    Output('paths-display',      'children'),
-    Output('comparison-results', 'children'),
-    Input('run-simulation', 'n_clicks'),
-    State('algorithm-type',    'value'),
-    State('traffic-intensity', 'value'),
-    State('flow-count',        'value'),
-    State('congestion-mode',   'value'),
+    Output("import-status", "children"),
+    Output("import-state", "data"),
+    Input("scenario-upload", "filename"),
+    Input("scenario-upload", "contents"),
     prevent_initial_call=True,
 )
-def run_simulation(n_clicks, algorithm_type, traffic_intensity, flow_count, congestion_mode):
-    global current_network
+def load_imported_scenario(file_names, file_contents):
+    if not file_names or not file_contents:
+        return "No scenario uploaded yet.", None
 
-    if not current_network:
-        err = html.P("⚠ Please generate a network first.", style={'color': 'red'})
-        return err, html.Div(), html.Div()
+    merged, notes = merge_import_records(zip(file_names, file_contents))
+    summary = (
+        f"Loaded {len(merged['nodes'])} nodes, {len(merged['edges'])} edges, "
+        f"and {len(merged['flows'])} traffic records. " + " | ".join(notes)
+    )
+    return summary, merged
 
-    intensity_defaults = {'low': 10, 'medium': 20, 'high': 40}
-    count = int(flow_count or 20) if traffic_intensity == 'custom' \
-            else intensity_defaults.get(traffic_intensity, 20)
 
-    traffic_gen = TrafficGenerator(current_network, traffic_intensity)
-    flows       = traffic_gen.generate_flows(count)
-    use_congestion = bool(congestion_mode)  # Checklist: ['on'] = True, [] = False
-    analyzer    = PerformanceMetrics(current_network, simulate_congestion=use_congestion)
+@app.callback(Output("edge-prob-container", "style"), Input("topology-type", "value"))
+def toggle_edge_prob(topology):
+    return {"display": "block"} if topology == "random" else {"display": "none"}
 
-    # ── ALL: compare every algorithm ─────────────────────────────────────────
-    if algorithm_type == 'all':
-        algorithms = {
-            'Dijkstra':     create_routing_algorithm('dijkstra',     current_network),
-            'Bellman-Ford': create_routing_algorithm('bellman_ford', current_network),
-            'ACO':          create_routing_algorithm('aco',          current_network),
-            'GA':           create_routing_algorithm('ga',           current_network),
-        }
-        comparison = analyzer.compare_algorithms(algorithms, flows)
 
-        # ── Scoring ───────────────────────────────────────────────────────────
-        # Normalise each metric across algorithms then compute weighted score
-        def normalise(values, lower_is_better=False):
-            mn, mx = min(values), max(values)
-            if mx == mn:
-                return [1.0] * len(values)
-            norm = [(v - mn) / (mx - mn) for v in values]
-            return [1 - n for n in norm] if lower_is_better else norm
+@app.callback(Output("custom-flow-container", "style"), Input("traffic-intensity", "value"))
+def toggle_custom_flows(intensity):
+    return {"display": "block"} if intensity == "custom" else {"display": "none"}
 
-        names   = list(comparison.keys())
-        metrics_list = list(comparison.values())
 
-        pdr_norm       = normalise([m['packet_delivery_ratio'] for m in metrics_list])
-        latency_norm   = normalise([m['average_latency']       for m in metrics_list], lower_is_better=True)
-        time_norm      = normalise([m['execution_time']        for m in metrics_list], lower_is_better=True)
-        throughput_norm= normalise([m['average_throughput']    for m in metrics_list])
-        hops_norm      = normalise([m['average_hop_count']     for m in metrics_list], lower_is_better=True)
+@app.callback(Output("random-failure-container", "style"), Input("random-failure-mode", "value"))
+def toggle_random_failures(value):
+    return {"display": "block", "marginBottom": "12px"} if value else {"display": "none", "marginBottom": "12px"}
 
-        WEIGHTS = {'pdr': 0.40, 'latency': 0.25, 'throughput': 0.15, 'time': 0.12, 'hops': 0.08}
-        scores  = [
-            round(
-                WEIGHTS['pdr']        * pdr_norm[i]        +
-                WEIGHTS['latency']    * latency_norm[i]     +
-                WEIGHTS['throughput'] * throughput_norm[i]  +
-                WEIGHTS['time']       * time_norm[i]        +
-                WEIGHTS['hops']       * hops_norm[i],
-                4
-            )
-            for i in range(len(names))
-        ]
 
-        best_idx  = scores.index(max(scores))
-        best_name = names[best_idx]
-
-        # ── Table ─────────────────────────────────────────────────────────────
-        BEST_ROW = {
-            'background': '#d4edda', 'fontWeight': 'bold',
-            'border': '2px solid #28a745',
-        }
-        BEST_TD  = {**TD, 'background': '#d4edda', 'fontWeight': 'bold'}
-        BEST_TH_CELL = {**TH, 'background': '#d4edda', 'fontWeight': 'bold'}
-
-        header = html.Thead(html.Tr(
-            [html.Th(c, style=TH) for c in
-             ['Algorithm', 'Time (s)', 'PDR', 'Avg Latency', 'Avg Throughput', 'Avg Hops', 'Score']]
-        ))
-
-        rows = []
-        for i, (name, m) in enumerate(comparison.items()):
-            is_best  = (i == best_idx)
-            cell     = BEST_TD if is_best else TD
-            label    = f"{name} ★ BEST" if is_best else name
-            rows.append(html.Tr([
-                html.Td(label,                                     style=cell),
-                html.Td(f"{m['execution_time']:.4f}",             style=cell),
-                html.Td(f"{m['packet_delivery_ratio']:.2%}",      style=cell),
-                html.Td(f"{m['average_latency']:.2f}",            style=cell),
-                html.Td(f"{m['average_throughput']:.2f} KB/unit", style=cell),
-                html.Td(f"{m['average_hop_count']:.2f}",          style=cell),
-                html.Td(f"{scores[i]:.4f}",                       style=cell),
-            ]))
-
-        table = html.Table(
-            [header, html.Tbody(rows)],
-            style={'width': '100%', 'borderCollapse': 'collapse'},
+@app.callback(
+    Output("congestion-toggle-label", "children"),
+    Output("congestion-toggle-label", "style"),
+    Output("congestion-info", "children"),
+    Output("congestion-info", "style"),
+    Input("congestion-mode", "value"),
+)
+def update_congestion_ui(value):
+    is_on = bool(value)
+    if is_on:
+        return (
+            "ON",
+            {"fontFamily": SANS_STACK, "fontSize": "13px", "fontWeight": "bold", "color": COLORS["primary"]},
+            "Active: link delay and packet-drop risk scale with link load relative to bandwidth.",
+            {"fontSize": "12px", "color": COLORS["primary_dark"], "marginTop": "10px", "fontFamily": SANS_STACK, "padding": "10px 12px", "background": "#eef9fc", "borderRadius": "14px", "borderLeft": f"4px solid {COLORS['primary']}"},
         )
 
-        # ── Weight legend ──────────────────────────────────────────────────────
-        legend = html.Div([
-            html.P(
-                f"★ Best overall algorithm: {best_name}  (score {scores[best_idx]:.4f})",
-                style={'color': '#155724', 'fontWeight': 'bold', 'fontSize': '15px',
-                       'margin': '12px 0 4px'}
-            ),
-            html.P(
-                "Score weights — PDR 40%  |  Latency 25%  |  Throughput 15%  |  Time 12%  |  Hops 8%",
-                style={'color': '#555', 'fontSize': '12px', 'fontStyle': 'italic'}
-            ),
-        ])
-
-        congestion_label = "with congestion simulation" if use_congestion else "without congestion (static)"
-        summary = html.P(f"Compared all 4 algorithms on {count} flows — {congestion_label}.",
-                         style={"color": "#155724" if use_congestion else "#555"})
-        return summary, html.Div(), html.Div([legend, table])
-
-    # ── Single algorithm ──────────────────────────────────────────────────────
-    algo    = create_routing_algorithm(algorithm_type, current_network)
-    results = analyzer.analyze_routing_performance(algo, flows)
-    paths   = results['paths']
-
-    metrics_html = html.Table(
-        [html.Tbody([
-            html.Tr([html.Td("Algorithm",             style=TH),
-                     html.Td(results['algorithm'],                                    style=TD)]),
-            html.Tr([html.Td("Execution Time",        style=TH),
-                     html.Td(f"{results['execution_time']:.4f} s",                   style=TD)]),
-            html.Tr([html.Td("Successful Routes",     style=TH),
-                     html.Td(f"{results['successful_routes']} / {results['total_flows']}", style=TD)]),
-            html.Tr([html.Td("Packet Delivery Ratio", style=TH),
-                     html.Td(f"{results['packet_delivery_ratio']:.2%}",               style=TD)]),
-            html.Tr([html.Td("Average Latency",       style=TH),
-                     html.Td(f"{results['average_latency']:.2f} units",               style=TD)]),
-            html.Tr([html.Td("Average Throughput",    style=TH),
-                     html.Td(f"{results['average_throughput']:.2f} KB/unit",          style=TD)]),
-            html.Tr([html.Td("Average Hop Count",     style=TH),
-                     html.Td(f"{results['average_hop_count']:.2f}",                   style=TD)]),
-        ])],
-        style={'width': '100%', 'borderCollapse': 'collapse'},
+    return (
+        "OFF",
+        {"fontFamily": SANS_STACK, "fontSize": "13px", "fontWeight": "bold", "color": COLORS["muted"]},
+        "Disabled: static routing using the base edge weights only.",
+        {"fontSize": "12px", "color": COLORS["muted"], "marginTop": "10px", "fontFamily": SANS_STACK, "padding": "10px 12px", "background": "#f4f1ec", "borderRadius": "14px", "borderLeft": f"4px solid {COLORS['line']}"},
     )
 
-    paths_html = html.Div([
-        html.P(f"Showing first 5 of {len(paths)} paths:"),
-        html.Ul([html.Li(f"Path {i+1}: {' → '.join(map(str, p))}")
-                 for i, p in enumerate(paths[:5])]),
-    ]) if paths else html.P("No paths found.")
 
-    hint = html.P('Select "ALL" in the algorithm dropdown to compare all algorithms.',
-                  style={'color': '#888', 'fontStyle': 'italic'})
-    return metrics_html, paths_html, hint
+@app.callback(
+    Output("network-status", "children"),
+    Output("network-state", "data"),
+    Output("simulation-state", "data"),
+    Output("report-state", "data"),
+    Input("generate-network", "n_clicks"),
+    State("topology-type", "value"),
+    State("node-count", "value"),
+    State("edge-prob", "value"),
+    State("random-seed", "value"),
+    State("import-state", "data"),
+    State("random-failure-mode", "value"),
+    State("random-down-node-count", "value"),
+    State("random-down-edge-count", "value"),
+    State("random-loss-node-count", "value"),
+    State("random-loss-edge-count", "value"),
+    State("random-maintenance-edge-count", "value"),
+    State("random-loss-min", "value"),
+    State("random-loss-max", "value"),
+    State("random-maintenance-min", "value"),
+    State("random-maintenance-max", "value"),
+    State("down-nodes", "value"),
+    State("down-edges", "value"),
+    State("packet-loss-edges", "value"),
+    State("packet-loss-nodes", "value"),
+    State("maintenance-edges", "value"),
+    prevent_initial_call=True,
+)
+def update_network_state(
+    n_clicks,
+    topology_type,
+    node_count,
+    edge_prob,
+    random_seed,
+    import_state,
+    random_failure_mode,
+    random_down_node_count,
+    random_down_edge_count,
+    random_loss_node_count,
+    random_loss_edge_count,
+    random_maintenance_edge_count,
+    random_loss_min,
+    random_loss_max,
+    random_maintenance_min,
+    random_maintenance_max,
+    down_nodes,
+    down_edges,
+    packet_loss_edges,
+    packet_loss_nodes,
+    maintenance_edges,
+):
+    del n_clicks
+    node_count = int(node_count or 20)
+    edge_prob = float(edge_prob or 0.3)
+    seed = None if random_seed in (None, "") else int(random_seed)
+
+    manual_failure_profile = build_manual_failure_profile(
+        down_nodes,
+        down_edges,
+        packet_loss_edges,
+        packet_loss_nodes,
+        maintenance_edges,
+    )
+
+    preview_network = build_network(topology_type, node_count, edge_prob, seed, import_state, None)
+    random_failure_profile = {}
+    if random_failure_mode:
+        random_failure_profile = preview_network.build_random_failure_profile(
+            seed=_offset_seed(seed, 90),
+            down_node_count=int(random_down_node_count or 0),
+            down_edge_count=int(random_down_edge_count or 0),
+            packet_loss_node_count=int(random_loss_node_count or 0),
+            packet_loss_edge_count=int(random_loss_edge_count or 0),
+            maintenance_edge_count=int(random_maintenance_edge_count or 0),
+            packet_loss_range=(float(random_loss_min or 0.1), float(random_loss_max or 0.35)),
+            maintenance_factor_range=(float(random_maintenance_min or 1.25), float(random_maintenance_max or 2.0)),
+        )
+
+    failure_profile = merge_failure_profiles(manual_failure_profile, random_failure_profile)
+
+    network = build_network(topology_type, node_count, edge_prob, seed, import_state, failure_profile)
+    source_label = "Imported scenario" if import_state and import_state.get("edges") else topology_type.capitalize()
+    status = (
+        f"{source_label} ready with {network.graph.number_of_nodes()} nodes and {network.graph.number_of_edges()} edges. "
+        f"Failures: {len(failure_profile['down_nodes'])} node-down, {len(failure_profile['down_edges'])} link-down, "
+        f"{len(failure_profile['maintenance_edges'])} maintenance overrides."
+    )
+    if random_failure_mode:
+        status += " Random failure mode used the scenario seed for reproducible sampling."
+    state = {
+        "topology_type": topology_type,
+        "node_count": network.graph.number_of_nodes(),
+        "edge_prob": edge_prob,
+        "seed": seed,
+        "import_data": import_state,
+        "failure_profile": failure_profile,
+        "source_label": source_label,
+    }
+    return status, state, None, None
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+@app.callback(
+    Output("network-graph", "figure"),
+    Input("network-state", "data"),
+    Input("simulation-state", "data"),
+)
+def render_network_graph(network_state, simulation_state):
+    if not network_state:
+        return empty_figure()
+
+    network = build_network(
+        network_state["topology_type"],
+        int(network_state["node_count"]),
+        float(network_state["edge_prob"]),
+        network_state.get("seed"),
+        network_state.get("import_data"),
+        network_state.get("failure_profile"),
+    )
+    return build_network_figure(network, network_state.get("source_label", "Scenario"), int(network_state["node_count"]), simulation_state)
+
+
+def _comparison_scores(comparison):
+    def normalise(values, lower_is_better=False):
+        min_value, max_value = min(values), max(values)
+        if min_value == max_value:
+            return [1.0] * len(values)
+        normalised = [(value - min_value) / (max_value - min_value) for value in values]
+        return [1 - value for value in normalised] if lower_is_better else normalised
+
+    names = list(comparison.keys())
+    metrics_list = list(comparison.values())
+    pdr_norm = normalise([metrics["packet_delivery_ratio"] for metrics in metrics_list])
+    latency_norm = normalise([metrics["average_latency"] for metrics in metrics_list], lower_is_better=True)
+    time_norm = normalise([metrics["execution_time"] for metrics in metrics_list], lower_is_better=True)
+    throughput_norm = normalise([metrics["average_throughput"] for metrics in metrics_list])
+    util_norm = normalise([metrics["max_utilization"] for metrics in metrics_list], lower_is_better=True)
+    weights = {"pdr": 0.38, "latency": 0.22, "throughput": 0.15, "time": 0.10, "util": 0.15}
+    return {
+        names[index]: round(
+            weights["pdr"] * pdr_norm[index]
+            + weights["latency"] * latency_norm[index]
+            + weights["throughput"] * throughput_norm[index]
+            + weights["time"] * time_norm[index]
+            + weights["util"] * util_norm[index],
+            4,
+        )
+        for index in range(len(names))
+    }
+
+
+@app.callback(
+    Output("simulation-state", "data", allow_duplicate=True),
+    Input("run-simulation", "n_clicks"),
+    State("network-state", "data"),
+    State("algorithm-type", "value"),
+    State("traffic-intensity", "value"),
+    State("flow-count", "value"),
+    State("congestion-mode", "value"),
+    prevent_initial_call=True,
+)
+def run_simulation(n_clicks, network_state, algorithm_type, traffic_intensity, flow_count, congestion_mode):
+    del n_clicks
+    if not network_state:
+        return None
+
+    seed = network_state.get("seed")
+    network = build_network(
+        network_state["topology_type"],
+        int(network_state["node_count"]),
+        float(network_state["edge_prob"]),
+        seed,
+        network_state.get("import_data"),
+        network_state.get("failure_profile"),
+    )
+
+    traffic_seed = _offset_seed(seed, 20)
+    analyzer_seed = _offset_seed(seed, 30)
+    traffic_gen = TrafficGenerator(network, traffic_intensity, seed=traffic_seed)
+    import_data = network_state.get("import_data") or {}
+    if import_data.get("flows"):
+        flows = traffic_gen.load_flows(import_data["flows"])
+    else:
+        intensity_defaults = {"low": 10, "medium": 20, "high": 40}
+        count = int(flow_count or 20) if traffic_intensity == "custom" else intensity_defaults.get(traffic_intensity, 20)
+        flows = traffic_gen.generate_flows(count)
+
+    analyzer = PerformanceMetrics(network, simulate_congestion=bool(congestion_mode), seed=analyzer_seed)
+
+    if algorithm_type == "all":
+        comparison = analyzer.compare_algorithms(create_algorithms(network, _offset_seed(seed, 40)), flows)
+        return {"mode": "all", "comparison": comparison, "scores": _comparison_scores(comparison), "seed": seed}
+
+    algorithm = create_routing_algorithm(algorithm_type, network, seed=_offset_seed(seed, 40))
+    results = analyzer.analyze_routing_performance(algorithm, flows)
+    return {
+        "mode": "single",
+        "algorithm_label": algorithm_type.replace("_", " ").title(),
+        "results": results,
+        "edge_loads": results.get("edge_loads", {}),
+        "flow_details": results.get("flow_details", []),
+        "seed": seed,
+    }
+
+
+@app.callback(
+    Output("report-state", "data", allow_duplicate=True),
+    Input("export-report", "n_clicks"),
+    State("network-state", "data"),
+    State("simulation-state", "data"),
+    prevent_initial_call=True,
+)
+def export_report(n_clicks, network_state, simulation_state):
+    del n_clicks
+    if not simulation_state:
+        return None
+    recommendations = build_recommendations(network_state, simulation_state)
+    return export_simulation_bundle(network_state, simulation_state, recommendations)
+
+
+@app.callback(
+    Output("metrics-display", "children"),
+    Output("edge-load-display", "children"),
+    Output("paths-display", "children"),
+    Output("comparison-results", "children"),
+    Output("recommendations-display", "children"),
+    Input("simulation-state", "data"),
+    Input("network-state", "data"),
+    Input("report-state", "data"),
+)
+def render_results(simulation_state, network_state, report_state):
+    recommendations = build_recommendations(network_state, simulation_state)
+    recommendations_panel = build_recommendations_panel(recommendations, report_state)
+
+    if not simulation_state:
+        return (
+            html.P("Run a simulation to populate the readout.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK}),
+            html.Div(),
+            html.P("Generate or import a network and run a simulation to inspect flow outcomes.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK}),
+            html.P('Switch the algorithm dropdown to "ALL" for a ranked comparison.', style={"color": COLORS["muted"], "fontFamily": SANS_STACK}),
+            recommendations_panel,
+        )
+
+    if simulation_state.get("mode") == "all":
+        summary = html.Div(
+            style={"padding": "14px 16px", "borderRadius": "16px", "background": "#eef9fc", "color": COLORS["primary_dark"], "fontFamily": SANS_STACK, "marginBottom": "12px"},
+            children="Comparison complete. The topology stays neutral because no single algorithm overlay is selected.",
+        )
+        return summary, html.Div(), html.P("Run a single algorithm to inspect per-flow outcomes.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK}), build_comparison_panel(simulation_state), recommendations_panel
+
+    results = simulation_state["results"]
+    metrics_panel = build_metrics_panel(results, simulation_state.get("seed"))
+    edge_panel = build_edge_load_panel(simulation_state)
+    flow_panel = build_flow_details_panel(simulation_state.get("flow_details", []))
+    comparison_hint = html.P('Switch the algorithm dropdown to "ALL" for a ranked comparison.', style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
+    return metrics_panel, edge_panel, flow_panel, comparison_hint, recommendations_panel
+
+
 def run_dashboard():
     port = 8050
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("  Network Routing Analyzer is running!")
-    print(f"  Open your browser and go to:")
+    print("  Open your browser and go to:")
     print(f"  http://localhost:{port}")
-    print("="*50 + "\n")
+    print("=" * 50 + "\n")
     app.run(debug=False, use_reloader=False, port=port)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run_dashboard()

@@ -1,13 +1,16 @@
 import heapq
 import random
-import numpy as np
 from collections import defaultdict
+
+import numpy as np
 
 class RoutingAlgorithm:
     """Base class for routing algorithms"""
-    def __init__(self, network):
+    def __init__(self, network, seed=None):
         self.network = network
-    
+        self.seed = seed
+        self.random = random.Random(seed)
+
     def route(self, source, destination):
         raise NotImplementedError("Subclasses must implement route method")
 
@@ -103,8 +106,8 @@ class BellmanFordRouting(RoutingAlgorithm):
 
 class ACORouting(RoutingAlgorithm):
     """Ant Colony Optimization based routing"""
-    def __init__(self, network, alpha=1, beta=2, evaporation_rate=0.5, ants=10, iterations=20):
-        super().__init__(network)
+    def __init__(self, network, alpha=1, beta=2, evaporation_rate=0.5, ants=10, iterations=20, seed=None):
+        super().__init__(network, seed=seed)
         self.alpha = alpha  # pheromone importance
         self.beta = beta    # heuristic importance
         self.evaporation_rate = evaporation_rate
@@ -185,7 +188,7 @@ class ACORouting(RoutingAlgorithm):
                 return None
                 
             # Select next node based on probability
-            rand_val = random.uniform(0, total_prob)
+            rand_val = self.random.uniform(0, total_prob)
             cum_prob = 0
             
             for neighbor, prob in probabilities:
@@ -224,8 +227,8 @@ class ACORouting(RoutingAlgorithm):
 
 class GARouting(RoutingAlgorithm):
     """Genetic Algorithm based routing"""
-    def __init__(self, network, population_size=20, generations=30, mutation_rate=0.1):
-        super().__init__(network)
+    def __init__(self, network, population_size=20, generations=30, mutation_rate=0.1, seed=None):
+        super().__init__(network, seed=seed)
         self.population_size = population_size
         self.generations = generations
         self.mutation_rate = mutation_rate
@@ -244,6 +247,8 @@ class GARouting(RoutingAlgorithm):
         """Run genetic algorithm optimization"""
         # Initialize population
         population = self._initialize_population(source, destination)
+        if not population:
+            return None
         
         best_path = None
         best_fitness = float('infinity')
@@ -270,10 +275,16 @@ class GARouting(RoutingAlgorithm):
                 child1, child2 = self._crossover(parent1, parent2)
                 child1 = self._mutate(child1, source, destination)
                 child2 = self._mutate(child2, source, destination)
-                
-                new_population.extend([child1, child2])
+
+                repaired_child1 = self._repair_path(child1, source, destination)
+                repaired_child2 = self._repair_path(child2, source, destination)
+                if repaired_child1:
+                    new_population.append(repaired_child1)
+                if repaired_child2:
+                    new_population.append(repaired_child2)
             
-            population = new_population[:self.population_size]
+            if new_population:
+                population = new_population[:self.population_size]
         
         return best_path
     
@@ -285,6 +296,77 @@ class GARouting(RoutingAlgorithm):
             if path:
                 population.append(path)
         return population
+
+    def _repair_path(self, path, source, destination):
+        """Repair a mutated or crossed-over path into a valid simple route."""
+        if not path:
+            return self._random_path(source, destination)
+
+        cleaned = []
+        seen = set()
+        for node in path:
+            if node not in self.network.graph:
+                continue
+            if cleaned and node == cleaned[-1]:
+                continue
+            if node in seen:
+                loop_start = cleaned.index(node)
+                cleaned = cleaned[:loop_start + 1]
+                seen = set(cleaned)
+                continue
+            cleaned.append(node)
+            seen.add(node)
+
+        if not cleaned or cleaned[0] != source:
+            cleaned.insert(0, source)
+        if cleaned[-1] != destination:
+            cleaned.append(destination)
+
+        repaired = [cleaned[0]]
+        for next_node in cleaned[1:]:
+            current = repaired[-1]
+            if current == next_node:
+                continue
+            if self.network.graph.has_edge(current, next_node):
+                repaired.append(next_node)
+                continue
+
+            try:
+                bridge = self.network.get_shortest_path(current, next_node)
+            except Exception:
+                bridge = None
+
+            if not bridge:
+                try:
+                    bridge = self.network.get_shortest_path(current, destination)
+                except Exception:
+                    bridge = None
+
+            if not bridge:
+                return self._random_path(source, destination)
+
+            repaired.extend(bridge[1:])
+            if repaired[-1] == destination:
+                break
+
+        if repaired[-1] != destination:
+            try:
+                tail = self.network.get_shortest_path(repaired[-1], destination)
+            except Exception:
+                tail = None
+            if not tail:
+                return self._random_path(source, destination)
+            repaired.extend(tail[1:])
+
+        final_path = []
+        for node in repaired:
+            if node in final_path:
+                loop_start = final_path.index(node)
+                final_path = final_path[:loop_start + 1]
+            else:
+                final_path.append(node)
+
+        return final_path if self._fitness(final_path) != float('infinity') else self._random_path(source, destination)
     
     def _random_path(self, source, destination):
         """Generate a random path from source to destination"""
@@ -305,9 +387,9 @@ class GARouting(RoutingAlgorithm):
                 all_neighbors = list(self.network.graph.neighbors(current))
                 if not all_neighbors:
                     return None
-                next_node = random.choice(all_neighbors)
+                next_node = self.random.choice(all_neighbors)
             else:
-                next_node = random.choice(neighbors)
+                next_node = self.random.choice(neighbors)
             
             path.append(next_node)
             visited.add(next_node)
@@ -336,7 +418,7 @@ class GARouting(RoutingAlgorithm):
         for _ in range(len(population)):
             # Tournament selection
             tournament_size = 3
-            tournament_indices = random.sample(range(len(population)), min(tournament_size, len(population)))
+            tournament_indices = self.random.sample(range(len(population)), min(tournament_size, len(population)))
             tournament_fitness = [fitness_scores[i] for i in tournament_indices]
             winner_index = tournament_indices[np.argmin(tournament_fitness)]
             selected.append(population[winner_index])
@@ -348,8 +430,8 @@ class GARouting(RoutingAlgorithm):
             return parent1, parent2
         
         # Single point crossover
-        point1 = random.randint(1, len(parent1) - 2)
-        point2 = random.randint(1, len(parent2) - 2)
+        point1 = self.random.randint(1, len(parent1) - 2)
+        point2 = self.random.randint(1, len(parent2) - 2)
         
         child1 = parent1[:point1] + [node for node in parent2[point2:] if node not in parent1[:point1]]
         child2 = parent2[:point2] + [node for node in parent1[point1:] if node not in parent2[:point2]]
@@ -358,28 +440,28 @@ class GARouting(RoutingAlgorithm):
     
     def _mutate(self, path, source, destination):
         """Mutate a path by swapping nodes or adding/removing nodes"""
-        if len(path) < 3 or random.random() > self.mutation_rate:
+        if len(path) < 3 or self.random.random() > self.mutation_rate:
             return path
-        
-        mutation_type = random.choice(['swap', 'insert', 'remove'])
-        
+
+        mutation_type = self.random.choice(['swap', 'insert', 'remove'])
+
         if mutation_type == 'swap' and len(path) > 3:
             # Swap two nodes (not source or destination)
-            idx1, idx2 = random.sample(range(1, len(path)-1), 2)
+            idx1, idx2 = self.random.sample(range(1, len(path)-1), 2)
             path[idx1], path[idx2] = path[idx2], path[idx1]
         elif mutation_type == 'insert':
             # Insert a random node
             available_nodes = [n for n in self.network.graph.nodes() if n not in path]
             if available_nodes:
-                insert_pos = random.randint(1, len(path)-1)
-                new_node = random.choice(available_nodes)
+                insert_pos = self.random.randint(1, len(path)-1)
+                new_node = self.random.choice(available_nodes)
                 path.insert(insert_pos, new_node)
         elif mutation_type == 'remove' and len(path) > 3:
             # Remove a node (not source or destination)
-            remove_pos = random.randint(1, len(path)-2)
+            remove_pos = self.random.randint(1, len(path)-2)
             path.pop(remove_pos)
         
-        return path
+        return self._repair_path(path, source, destination)
 
 # Factory function to create routing algorithm instances
 def create_routing_algorithm(algorithm_name, network, **kwargs):
