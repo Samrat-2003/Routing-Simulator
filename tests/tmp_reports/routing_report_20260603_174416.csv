@@ -1,0 +1,16 @@
+section,key,value
+scenario,source_label,Imported scenario
+scenario,failure_profile,{}
+metrics,algorithm,DijkstraRouting
+metrics,execution_time,0.1
+metrics,successful_routes,4
+metrics,dropped_flows,1
+metrics,total_flows,5
+metrics,packet_delivery_ratio,0.8
+metrics,average_latency,3.2
+metrics,average_throughput,22.0
+metrics,average_hop_count,1.4
+metrics,average_utilization,0.55
+metrics,max_utilization,1.1
+metrics,congested_edges,1
+edge_load,0-1,"load=110, bandwidth=100, ratio=1.1"

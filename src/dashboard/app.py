@@ -3,6 +3,26 @@ import json
 import math
 import os
 import sys
+import types
+from importlib import metadata
+
+try:
+    import pkg_resources  # noqa: F401
+except ModuleNotFoundError:
+    from packaging.version import parse as parse_version
+
+    pkg_resources = types.ModuleType("pkg_resources")
+
+    class _Distribution:
+        def __init__(self, version):
+            self.version = version
+
+    def get_distribution(package_name):
+        return _Distribution(metadata.version(package_name))
+
+    pkg_resources.get_distribution = get_distribution
+    pkg_resources.parse_version = parse_version
+    sys.modules["pkg_resources"] = pkg_resources
 
 import dash
 from dash import Input, Output, State, dcc, html
@@ -199,6 +219,63 @@ def parse_edge_pairs(text):
     return edges
 
 
+def edge_storage_key(edge):
+    u, v = edge
+    return json.dumps([u, v], separators=(",", ":"))
+
+
+def edge_from_storage_key(key):
+    if isinstance(key, (list, tuple)) and len(key) == 2:
+        return key[0], key[1]
+    if isinstance(key, str):
+        try:
+            decoded = json.loads(key)
+            if isinstance(decoded, list) and len(decoded) == 2:
+                return decoded[0], decoded[1]
+        except json.JSONDecodeError:
+            pass
+        if "-" in key:
+            left, right = [part.strip() for part in key.split("-", 1)]
+            return parse_number(left), parse_number(right)
+    return key
+
+
+def normalise_edge_map(edge_map):
+    normalised = {}
+    for edge, value in (edge_map or {}).items():
+        normalised[edge_from_storage_key(edge)] = value
+    return normalised
+
+
+def normalise_node_map(node_map):
+    normalised = {}
+    for node, value in (node_map or {}).items():
+        normalised[parse_number(node)] = value
+    return normalised
+
+
+def serialise_failure_profile(profile):
+    profile = profile or {}
+    return {
+        "down_nodes": list(profile.get("down_nodes", [])),
+        "down_edges": [list(edge_from_storage_key(edge)) for edge in profile.get("down_edges", [])],
+        "packet_loss_nodes": profile.get("packet_loss_nodes", {}),
+        "packet_loss_edges": {edge_storage_key(edge_from_storage_key(edge)): value for edge, value in (profile.get("packet_loss_edges") or {}).items()},
+        "maintenance_edges": {edge_storage_key(edge_from_storage_key(edge)): value for edge, value in (profile.get("maintenance_edges") or {}).items()},
+    }
+
+
+def deserialise_failure_profile(profile):
+    profile = profile or {}
+    return {
+        "down_nodes": list(profile.get("down_nodes", [])),
+        "down_edges": [edge_from_storage_key(edge) for edge in profile.get("down_edges", [])],
+        "packet_loss_nodes": normalise_node_map(profile.get("packet_loss_nodes")),
+        "packet_loss_edges": normalise_edge_map(profile.get("packet_loss_edges")),
+        "maintenance_edges": normalise_edge_map(profile.get("maintenance_edges")),
+    }
+
+
 def parse_scored_edges(text):
     values = {}
     for chunk in (text or "").split(","):
@@ -301,7 +378,7 @@ def build_network(topology_type, node_count, edge_prob, seed, import_data=None, 
         }
         builders[topology_type]()
 
-    network.apply_failure_profile(failure_profile or {})
+    network.apply_failure_profile(deserialise_failure_profile(failure_profile))
     return network
 
 
@@ -317,14 +394,15 @@ def merge_failure_profiles(*profiles):
     for profile in profiles:
         if not profile:
             continue
-        merged["down_nodes"].extend(profile.get("down_nodes", []))
-        merged["down_edges"].extend(profile.get("down_edges", []))
-        merged["packet_loss_nodes"].update(profile.get("packet_loss_nodes", {}))
-        merged["packet_loss_edges"].update(profile.get("packet_loss_edges", {}))
-        merged["maintenance_edges"].update(profile.get("maintenance_edges", {}))
+        normalised = deserialise_failure_profile(profile)
+        merged["down_nodes"].extend(normalised.get("down_nodes", []))
+        merged["down_edges"].extend(normalised.get("down_edges", []))
+        merged["packet_loss_nodes"].update(normalised.get("packet_loss_nodes", {}))
+        merged["packet_loss_edges"].update(normalised.get("packet_loss_edges", {}))
+        merged["maintenance_edges"].update(normalised.get("maintenance_edges", {}))
 
     merged["down_nodes"] = list(dict.fromkeys(merged["down_nodes"]))
-    merged["down_edges"] = list(dict.fromkeys((min(u, v), max(u, v)) for u, v in merged["down_edges"]))
+    merged["down_edges"] = list(dict.fromkeys(edge_from_storage_key(edge) for edge in merged["down_edges"]))
     return merged
 
 
@@ -589,6 +667,82 @@ def build_comparison_panel(simulation_state):
     )
 
 
+def build_comparison_histograms(simulation_state):
+    comparison = simulation_state.get("comparison", {})
+    scores = simulation_state.get("scores", {})
+    if not comparison:
+        return html.P("Run ALL mode to plot comparison metrics.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
+
+    names = list(comparison.keys())
+    metrics = ["Score", "PDR", "Latency", "Throughput", "Max Util"]
+    colors = [COLORS["primary"], COLORS["success"], COLORS["warning"], COLORS["danger"]]
+
+    figure = go.Figure()
+    for index, name in enumerate(names):
+        values = [
+            scores.get(name, 0),
+            comparison[name]["packet_delivery_ratio"] * 100,
+            comparison[name]["average_latency"],
+            comparison[name]["average_throughput"],
+            comparison[name]["max_utilization"],
+        ]
+        figure.add_trace(
+            go.Bar(
+                name=name,
+                x=metrics,
+                y=values,
+                marker=dict(color=colors[index % len(colors)]),
+                text=values,
+                texttemplate="%{text:.2f}",
+                textposition="outside",
+                hovertemplate="%{x}: %{y:.2f}<extra>" + name + "</extra>",
+            )
+        )
+
+    figure.update_layout(
+        barmode="group",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="white",
+        margin=dict(l=44, r=16, t=18, b=58),
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0, font=dict(family=SANS_STACK, size=11)),
+        xaxis=dict(tickfont=dict(family=SANS_STACK, size=11), fixedrange=True),
+        yaxis=dict(tickfont=dict(family=SANS_STACK, size=10), fixedrange=True, rangemode="tozero", title=dict(text="Metric value", font=dict(family=SANS_STACK, size=11))),
+        uniformtext=dict(mode="hide", minsize=9),
+    )
+
+    return dcc.Graph(
+        figure=figure,
+        config={"displayModeBar": False},
+        style={"height": "430px", "minWidth": "0"},
+    )
+
+
+def build_comparison_summary_panel(simulation_state):
+    scores = simulation_state.get("scores", {})
+    if not scores:
+        return html.P("Run ALL mode to see the best scoring algorithm.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
+
+    ranking = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return html.Div(
+        children=[
+            metric_chip("Leader", ranking[0][0], COLORS["success"]),
+            html.Div(
+                style={"marginTop": "12px", "display": "grid", "gap": "8px"},
+                children=[
+                    html.Div(
+                        style={"display": "flex", "justifyContent": "space-between", "gap": "12px", "background": "white", "border": f"1px solid {COLORS['line']}", "borderRadius": "14px", "padding": "10px 12px", "fontFamily": SANS_STACK},
+                        children=[
+                            html.Span(f"{index + 1}. {name}", style={"fontWeight": "bold", "color": COLORS["ink"]}),
+                            html.Span(f"{score:.4f}", style={"color": COLORS["muted"]}),
+                        ],
+                    )
+                    for index, (name, score) in enumerate(ranking)
+                ],
+            ),
+        ]
+    )
+
+
 def build_recommendations_panel(recommendations, report_state):
     if not recommendations:
         recommendations = [{"priority": "low", "title": "Run a scenario", "detail": "Recommendations appear after you simulate a real or generated network."}]
@@ -833,7 +987,7 @@ app.layout = html.Div(
                         html.Div(
                             style=CARD,
                             children=[
-                                panel_heading("Performance Readout", "The metrics update after each simulation run."),
+                                html.Div(id="metrics-panel-heading", children=panel_heading("Performance Readout", "The metrics update after each simulation run.")),
                                 html.Div(id="metrics-display", style={"fontSize": "14px"}),
                                 html.Div(id="edge-load-display", style={"fontSize": "13px"}),
                             ],
@@ -846,14 +1000,14 @@ app.layout = html.Div(
                         html.Div(
                             style=CARD,
                             children=[
-                                panel_heading("Flow Narratives", "Inspect the first few traffic flows to see who gets through and who gets dropped."),
+                                html.Div(id="paths-panel-heading", children=panel_heading("Flow Narratives", "Inspect the first few traffic flows to see who gets through and who gets dropped.")),
                                 html.Div(id="paths-display", style={"fontSize": "13px"}),
                             ],
                         ),
                         html.Div(
                             style=CARD,
                             children=[
-                                panel_heading("Algorithm Comparison", "Use ALL mode to rank the routing strategies."),
+                                html.Div(id="comparison-panel-heading", children=panel_heading("Algorithm Comparison", "Use ALL mode to rank the routing strategies.")),
                                 html.Div(id="comparison-results", style={"fontSize": "14px"}),
                             ],
                         ),
@@ -1022,11 +1176,13 @@ def update_network_state(
         status += " Random failure mode used the scenario seed for reproducible sampling."
     state = {
         "topology_type": topology_type,
-        "node_count": network.graph.number_of_nodes(),
+        "node_count": node_count,
+        "active_node_count": network.graph.number_of_nodes(),
+        "active_edge_count": network.graph.number_of_edges(),
         "edge_prob": edge_prob,
         "seed": seed,
         "import_data": import_state,
-        "failure_profile": failure_profile,
+        "failure_profile": serialise_failure_profile(failure_profile),
         "source_label": source_label,
     }
     return status, state, None, None
@@ -1151,9 +1307,12 @@ def export_report(n_clicks, network_state, simulation_state):
 
 
 @app.callback(
+    Output("metrics-panel-heading", "children"),
     Output("metrics-display", "children"),
     Output("edge-load-display", "children"),
+    Output("paths-panel-heading", "children"),
     Output("paths-display", "children"),
+    Output("comparison-panel-heading", "children"),
     Output("comparison-results", "children"),
     Output("recommendations-display", "children"),
     Input("simulation-state", "data"),
@@ -1166,26 +1325,43 @@ def render_results(simulation_state, network_state, report_state):
 
     if not simulation_state:
         return (
+            panel_heading("Performance Readout", "The metrics update after each simulation run."),
             html.P("Run a simulation to populate the readout.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK}),
             html.Div(),
+            panel_heading("Flow Narratives", "Inspect the first few traffic flows to see who gets through and who gets dropped."),
             html.P("Generate or import a network and run a simulation to inspect flow outcomes.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK}),
+            panel_heading("Algorithm Comparison", "Use ALL mode to rank the routing strategies."),
             html.P('Switch the algorithm dropdown to "ALL" for a ranked comparison.', style={"color": COLORS["muted"], "fontFamily": SANS_STACK}),
             recommendations_panel,
         )
 
     if simulation_state.get("mode") == "all":
-        summary = html.Div(
-            style={"padding": "14px 16px", "borderRadius": "16px", "background": "#eef9fc", "color": COLORS["primary_dark"], "fontFamily": SANS_STACK, "marginBottom": "12px"},
-            children="Comparison complete. The topology stays neutral because no single algorithm overlay is selected.",
+        return (
+            panel_heading("Algorithm Comparison", "Rank all routing strategies for the current scenario."),
+            build_comparison_panel(simulation_state),
+            html.Div(),
+            panel_heading("Metric Histogram", "Compare Score, PDR, Latency, Throughput, and Max Util across all algorithms."),
+            build_comparison_histograms(simulation_state),
+            panel_heading("Ranking Summary", "A compact score order for the current comparison run."),
+            build_comparison_summary_panel(simulation_state),
+            recommendations_panel,
         )
-        return summary, html.Div(), html.P("Run a single algorithm to inspect per-flow outcomes.", style={"color": COLORS["muted"], "fontFamily": SANS_STACK}), build_comparison_panel(simulation_state), recommendations_panel
 
     results = simulation_state["results"]
     metrics_panel = build_metrics_panel(results, simulation_state.get("seed"))
     edge_panel = build_edge_load_panel(simulation_state)
     flow_panel = build_flow_details_panel(simulation_state.get("flow_details", []))
     comparison_hint = html.P('Switch the algorithm dropdown to "ALL" for a ranked comparison.', style={"color": COLORS["muted"], "fontFamily": SANS_STACK})
-    return metrics_panel, edge_panel, flow_panel, comparison_hint, recommendations_panel
+    return (
+        panel_heading("Performance Readout", "The metrics update after each simulation run."),
+        metrics_panel,
+        edge_panel,
+        panel_heading("Flow Narratives", "Inspect the first few traffic flows to see who gets through and who gets dropped."),
+        flow_panel,
+        panel_heading("Algorithm Comparison", "Use ALL mode to rank the routing strategies."),
+        comparison_hint,
+        recommendations_panel,
+    )
 
 
 def run_dashboard():
