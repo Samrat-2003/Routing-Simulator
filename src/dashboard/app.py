@@ -5,6 +5,7 @@ import os
 import sys
 import types
 from importlib import metadata
+import requests
 
 try:
     import pkg_resources  # noqa: F401
@@ -33,12 +34,13 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.algorithms.routing import create_routing_algorithm
-from src.metrics.analyzer import PerformanceMetrics
+
 from src.network.topology import NetworkTopology
 from src.planning.recommendations import build_recommendations
 from src.reporting.exporter import export_simulation_bundle
-from src.traffic.generator import TrafficGenerator
+from src.dashboard.api_client import simulate,compare,report
+from src.dashboard.api_client import recommendations as recommendation_api
+
 
 
 app = dash.Dash(__name__)
@@ -404,16 +406,6 @@ def merge_failure_profiles(*profiles):
     merged["down_nodes"] = list(dict.fromkeys(merged["down_nodes"]))
     merged["down_edges"] = list(dict.fromkeys(edge_from_storage_key(edge) for edge in merged["down_edges"]))
     return merged
-
-
-def create_algorithms(network, base_seed):
-    return {
-        "Dijkstra": create_routing_algorithm("dijkstra", network, seed=_offset_seed(base_seed, 0)),
-        "Bellman-Ford": create_routing_algorithm("bellman_ford", network, seed=_offset_seed(base_seed, 1)),
-        "ACO": create_routing_algorithm("aco", network, seed=_offset_seed(base_seed, 2)),
-        "GA": create_routing_algorithm("ga", network, seed=_offset_seed(base_seed, 3)),
-    }
-
 
 def build_network_figure(network, title_label, node_count, simulation_state=None):
     if network is None or network.graph.number_of_nodes() == 0:
@@ -1208,33 +1200,6 @@ def render_network_graph(network_state, simulation_state):
     return build_network_figure(network, network_state.get("source_label", "Scenario"), int(network_state["node_count"]), simulation_state)
 
 
-def _comparison_scores(comparison):
-    def normalise(values, lower_is_better=False):
-        min_value, max_value = min(values), max(values)
-        if min_value == max_value:
-            return [1.0] * len(values)
-        normalised = [(value - min_value) / (max_value - min_value) for value in values]
-        return [1 - value for value in normalised] if lower_is_better else normalised
-
-    names = list(comparison.keys())
-    metrics_list = list(comparison.values())
-    pdr_norm = normalise([metrics["packet_delivery_ratio"] for metrics in metrics_list])
-    latency_norm = normalise([metrics["average_latency"] for metrics in metrics_list], lower_is_better=True)
-    time_norm = normalise([metrics["execution_time"] for metrics in metrics_list], lower_is_better=True)
-    throughput_norm = normalise([metrics["average_throughput"] for metrics in metrics_list])
-    util_norm = normalise([metrics["max_utilization"] for metrics in metrics_list], lower_is_better=True)
-    weights = {"pdr": 0.38, "latency": 0.22, "throughput": 0.15, "time": 0.10, "util": 0.15}
-    return {
-        names[index]: round(
-            weights["pdr"] * pdr_norm[index]
-            + weights["latency"] * latency_norm[index]
-            + weights["throughput"] * throughput_norm[index]
-            + weights["time"] * time_norm[index]
-            + weights["util"] * util_norm[index],
-            4,
-        )
-        for index in range(len(names))
-    }
 
 
 @app.callback(
@@ -1247,48 +1212,49 @@ def _comparison_scores(comparison):
     State("congestion-mode", "value"),
     prevent_initial_call=True,
 )
-def run_simulation(n_clicks, network_state, algorithm_type, traffic_intensity, flow_count, congestion_mode):
+def run_simulation(
+    n_clicks,
+    network_state,
+    algorithm_type,
+    traffic_intensity,
+    flow_count,
+    congestion_mode
+):
     del n_clicks
+
     if not network_state:
         return None
 
-    seed = network_state.get("seed")
-    network = build_network(
-        network_state["topology_type"],
-        int(network_state["node_count"]),
-        float(network_state["edge_prob"]),
-        seed,
-        network_state.get("import_data"),
-        network_state.get("failure_profile"),
-    )
-
-    traffic_seed = _offset_seed(seed, 20)
-    analyzer_seed = _offset_seed(seed, 30)
-    traffic_gen = TrafficGenerator(network, traffic_intensity, seed=traffic_seed)
-    import_data = network_state.get("import_data") or {}
-    if import_data.get("flows"):
-        flows = traffic_gen.load_flows(import_data["flows"])
-    else:
-        intensity_defaults = {"low": 10, "medium": 20, "high": 40}
-        count = int(flow_count or 20) if traffic_intensity == "custom" else intensity_defaults.get(traffic_intensity, 20)
-        flows = traffic_gen.generate_flows(count)
-
-    analyzer = PerformanceMetrics(network, simulate_congestion=bool(congestion_mode), seed=analyzer_seed)
-
+    payload = {
+        "topology": network_state["topology_type"],
+        "algorithm": algorithm_type,
+        "nodes": network_state["node_count"],
+        "traffic": traffic_intensity,
+        "seed": network_state.get("seed"),
+        "edge_prob": network_state["edge_prob"]
+    }
     if algorithm_type == "all":
-        comparison = analyzer.compare_algorithms(create_algorithms(network, _offset_seed(seed, 40)), flows)
-        return {"mode": "all", "comparison": comparison, "scores": _comparison_scores(comparison), "seed": seed}
+        
+        api_result = compare(payload)
 
-    algorithm = create_routing_algorithm(algorithm_type, network, seed=_offset_seed(seed, 40))
-    results = analyzer.analyze_routing_performance(algorithm, flows)
+        return {
+            "mode": "all",
+            "comparison": api_result["comparison"],
+            "scores": api_result["scores"],
+            "seed": network_state.get("seed")
+        }
+
+    api_result = simulate(payload)
+
     return {
         "mode": "single",
         "algorithm_label": algorithm_type.replace("_", " ").title(),
-        "results": results,
-        "edge_loads": results.get("edge_loads", {}),
-        "flow_details": results.get("flow_details", []),
-        "seed": seed,
+        "results": api_result,
+        "edge_loads": api_result.get("edge_loads", {}),
+        "flow_details": api_result.get("flow_details", []),
+        "seed": network_state.get("seed")
     }
+
 
 
 @app.callback(
@@ -1298,12 +1264,31 @@ def run_simulation(n_clicks, network_state, algorithm_type, traffic_intensity, f
     State("simulation-state", "data"),
     prevent_initial_call=True,
 )
-def export_report(n_clicks, network_state, simulation_state):
+def export_report(
+    n_clicks,
+    network_state,
+    simulation_state
+):
     del n_clicks
+
     if not simulation_state:
         return None
-    recommendations = build_recommendations(network_state, simulation_state)
-    return export_simulation_bundle(network_state, simulation_state, recommendations)
+
+    recommendation_data = recommendation_api({
+            "network_state": network_state,
+            "simulation_state": simulation_state
+        }
+    )
+
+
+    report_data = report({
+            "network_state": network_state,
+            "simulation_state": simulation_state,
+            "recommendations": recommendation_data
+        }
+    )
+
+    return report_data
 
 
 @app.callback(
@@ -1320,8 +1305,20 @@ def export_report(n_clicks, network_state, simulation_state):
     Input("report-state", "data"),
 )
 def render_results(simulation_state, network_state, report_state):
-    recommendations = build_recommendations(network_state, simulation_state)
-    recommendations_panel = build_recommendations_panel(recommendations, report_state)
+
+    recommendations = []
+
+    if simulation_state and network_state:
+
+        recommendations = recommendation_api({
+            "network_state": network_state,
+            "simulation_state": simulation_state
+        })
+
+    recommendations_panel = build_recommendations_panel(
+        recommendations,
+        report_state
+    )
 
     if not simulation_state:
         return (

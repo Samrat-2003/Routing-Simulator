@@ -25,9 +25,14 @@ The project is designed for final-year experimentation and demos. It includes an
 |-- requirements.txt              # Python dependencies
 |-- config/
 |   `-- config.json               # Default topology, traffic, and simulation settings
+|-- backend/                       # Flask backend connecting Dashboard to backend server
+|   |--server.py
 |-- src/
 |   |-- algorithms/routing.py      # Dijkstra, Bellman-Ford, ACO, and GA implementations
-|   |-- dashboard/app.py           # Dash web dashboard
+|   |-- dashboard                  # Dash web dashboard
+|   |   |--app.py
+|   |   |--config.py
+|   |   |--api_client.py           # Helper file handling  REST APIs
 |   |-- metrics/analyzer.py        # Latency, throughput, PDR, congestion, and load metrics
 |   |-- network/topology.py        # Topology generation, import, and failure profiles
 |   |-- planning/recommendations.py# Capacity and resilience recommendations
@@ -35,6 +40,7 @@ The project is designed for final-year experimentation and demos. It includes an
 |   `-- traffic/generator.py       # Random and imported traffic flows
 |-- reports/                       # Generated dashboard reports
 `-- tests/                         # Unit tests
+`--test.http                       #APis Testing
 ```
 
 ## Requirements
@@ -109,6 +115,29 @@ python main.py --seed 42 --export outputs/results.csv
 ```
 
 To compare all algorithms from the CLI, choose `ALL` when prompted for the routing algorithm.
+
+## Running the backend server
+
+Launch the server:
+```powershell
+python backend/server.py
+```
+
+The server runs on:
+```test
+http://localhost:5000
+```
+
+The backend server handles:
+
+- Network topology generation
+- Routing simulations
+- Algorithm comparison
+- Recommendation generation
+- Report generation
+- REST API endpoints for dashboard communication
+
+Note: Keep the backend server running before starting the dashboard.
 
 ## Running the Dashboard
 

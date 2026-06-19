@@ -1,0 +1,47 @@
+# POST http://127.0.0.1:5000/api/simulate
+# Content-Type: application/json
+
+# {
+#   "algorithm": "dijkstra",
+#   "topology": "mesh",
+#   "nodes": 20,
+#   "traffic": "medium"
+# }
+
+# POST http://127.0.0.1:5000/api/compare
+# Content-Type: application/json
+
+# {
+#     "topology":"mesh",
+#     "nodes":10,
+#     "traffic":"medium",
+#     "seed":10
+# }
+
+# POST http://127.0.0.1:5000/api/recommendations
+# Content-Type: application/json
+
+# {
+#   "topology": "mesh",
+#   "algorithm": "dijkstra",
+#   "nodes": 10,
+#   "traffic": "low"
+# }
+
+POST http://127.0.0.1:5000/api/network-info
+Content-Type: application/json
+
+{
+    "topology": "mesh",
+    "nodes": 20
+}
+
+# POST http://127.0.0.1:5000/api/report
+# Content-Type: application/json
+
+# {
+#   "topology":"mesh",
+#   "algorithm":"dijkstra"
+# }
+
+# # GET http://127.0.0.1:5000/api/topologies
