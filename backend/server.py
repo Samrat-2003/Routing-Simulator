@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 
 PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
@@ -18,6 +19,50 @@ from src.planning.recommendations import build_recommendations
 from src.reporting.exporter import export_simulation_bundle
 
 
+def parse_number(value):
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def edge_from_storage_key(key):
+    if isinstance(key, (list, tuple)) and len(key) == 2:
+        return key[0], key[1]
+    if isinstance(key, str):
+        try:
+            decoded = json.loads(key)
+            if isinstance(decoded, list) and len(decoded) == 2:
+                return decoded[0], decoded[1]
+        except json.JSONDecodeError:
+            pass
+        if "-" in key:
+            left, right = [part.strip() for part in key.split("-", 1)]
+            return parse_number(left), parse_number(right)
+    return key
+
+
+def normalise_node_map(node_map):
+    return {parse_number(node): value for node, value in (node_map or {}).items()}
+
+
+def normalise_edge_map(edge_map):
+    return {edge_from_storage_key(edge): value for edge, value in (edge_map or {}).items()}
+
+
+def deserialise_failure_profile(profile):
+    profile = profile or {}
+    return {
+        "down_nodes": list(profile.get("down_nodes", [])),
+        "down_edges": [edge_from_storage_key(edge) for edge in profile.get("down_edges", [])],
+        "packet_loss_nodes": normalise_node_map(profile.get("packet_loss_nodes")),
+        "packet_loss_edges": normalise_edge_map(profile.get("packet_loss_edges")),
+        "maintenance_edges": normalise_edge_map(profile.get("maintenance_edges")),
+    }
+
+
 def build_network_from_request(data):
 
     topology = data.get("topology", "mesh")
@@ -31,8 +76,12 @@ def build_network_from_request(data):
     edge_prob = float(data.get("edge_prob", 0.3))
 
     network = NetworkTopology(seed=seed)
+    import_data = data.get("import_data")
 
-    if topology == "mesh":
+    if import_data and import_data.get("edges"):
+        network.load_from_data(import_data.get("nodes"), import_data.get("edges"), seed=seed)
+
+    elif topology == "mesh":
         network.create_mesh_topology(nodes)
 
     elif topology == "ring":
@@ -50,6 +99,7 @@ def build_network_from_request(data):
     else:
         raise ValueError(f"Unknown topology {topology}")
 
+    network.apply_failure_profile(deserialise_failure_profile(data.get("failure_profile")))
     return network
 
 
@@ -84,11 +134,13 @@ def simulate():
     algorithm = data.get("algorithm", "dijkstra")
     traffic = data.get("traffic", "medium")
     seed = data.get("seed")
+    flow_count = int(data.get("flow_count", 20) or 20)
     
     result = simulate_network(
         network=network,
         algorithm_type=algorithm,
         traffic_intensity=traffic,
+        flow_count=flow_count,
         seed=seed,
     )
 
@@ -107,10 +159,12 @@ def compare():
     
     seed = data.get("seed")
     traffic = data.get("traffic", "medium")
+    flow_count = int(data.get("flow_count", 20) or 20)
     
     result = compare_algorithms(
         network=network,
         traffic_intensity=traffic,
+        flow_count=flow_count,
         seed=seed
         )
     
@@ -178,6 +232,10 @@ def algorithms():
             {
                 "id": "bellman_ford",
                 "name": "Bellman Ford"
+            },
+            {
+                "id": "pca_mr",
+                "name": "PCA-MR Proposed Algorithm"
             },
             {
                 "id": "aco",

@@ -99,6 +99,28 @@ class TestPerformanceMetrics(unittest.TestCase):
         self.assertEqual(len(congested_results["flow_details"]), len(flows))
         self.assertIn("load_ratio", next(iter(congested_results["edge_loads"].values())))
 
+    def test_edge_loads_include_congestion_packet_loss(self):
+        """Serialized edge loads should expose runtime overload drop risk."""
+        network = NetworkTopology(seed=5)
+        network.create_ring_topology(3, seed=5)
+
+        for u, v in network.graph.edges():
+            network.graph[u][v]["weight"] = 100
+            network.graph[u][v]["base_weight"] = 100
+            network.graph[u][v]["bandwidth"] = 100
+
+        network.graph[0][1]["weight"] = 1
+        network.graph[0][1]["base_weight"] = 1
+        network.graph[0][1]["bandwidth"] = 5
+
+        flows = [Flow(0, 1, 10, 0)]
+        results = PerformanceMetrics(network, simulate_congestion=True, seed=7).analyze_routing_performance(
+            DijkstraRouting(network),
+            flows,
+        )
+
+        self.assertGreater(results["edge_loads"]["0-1"]["packet_loss"], 0)
+
     def test_loaded_traffic_matrix_creates_multiple_flows(self):
         """Traffic generator should expand demand records into flows."""
         traffic = TrafficGenerator(self.network, "low")

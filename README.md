@@ -7,7 +7,7 @@ The project is designed for final-year experimentation and demos. It includes an
 ## Features
 
 - Generate random, mesh, ring, and star network topologies.
-- Compare Dijkstra, Bellman-Ford, Ant Colony Optimization (ACO), and Genetic Algorithm (GA) routing.
+- Compare Dijkstra, Bellman-Ford, PCA-MR, Ant Colony Optimization (ACO), and Genetic Algorithm (GA) routing.
 - Simulate low, medium, high, or custom traffic loads.
 - Use random seeds for repeatable topology, traffic, and stochastic algorithm behavior.
 - Model congestion using link bandwidth and packet size.
@@ -28,7 +28,7 @@ The project is designed for final-year experimentation and demos. It includes an
 |-- backend/                       # Flask backend connecting Dashboard to backend server
 |   |--server.py
 |-- src/
-|   |-- algorithms/routing.py      # Dijkstra, Bellman-Ford, ACO, and GA implementations
+|   |-- algorithms/routing.py      # Dijkstra, Bellman-Ford, PCA-MR, ACO, and GA implementations
 |   |-- dashboard                  # Dash web dashboard
 |   |   |--app.py
 |   |   |--config.py
@@ -209,8 +209,28 @@ Each simulation can report:
 | --- | --- |
 | Dijkstra | Deterministic shortest-path routing using edge weights. |
 | Bellman-Ford | Shortest-path routing with repeated edge relaxation. |
+| PCA-MR | Proposed Predictive Congestion-Aware Multipath Routing using normalized cost, logarithmic loss penalty, and link load ratio. |
 | ACO | Stochastic path optimization using pheromone trails and edge-cost heuristics. |
 | GA | Stochastic route search using population selection, crossover, mutation, and repair. |
+
+## Proposed Algorithm: PCA-MR
+
+PCA-MR, or Predictive Congestion-Aware Multipath Routing, is the proposed algorithm in this project. Instead of selecting a route only by shortest distance, it computes a dynamic link score:
+
+```text
+psi(u,v,t) = alpha * normalized_weight(u,v)
+           + beta  * [-ln(1 - loss(u,v,t))]
+           + gamma * load_ratio(u,v,t)
+```
+
+Where:
+
+- `normalized_weight` represents the base delay or distance of the link.
+- `loss` represents current packet-loss probability on the link or adjacent nodes.
+- `load_ratio` represents projected traffic load divided by available bandwidth.
+- `alpha`, `beta`, and `gamma` control the importance of distance, reliability, and congestion.
+
+The logarithmic loss term sharply penalizes unreliable links as packet loss rises. PCA-MR also remembers previously routed demand and smooths link scores over time, so later flows are pushed away from congested or lossy links. This makes it strongest in scenarios with high traffic, packet-loss zones, bandwidth limits, or maintenance-degraded links.
 
 ## Configuration
 

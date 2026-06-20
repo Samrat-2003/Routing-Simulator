@@ -78,17 +78,19 @@ def get_algorithm_choice():
     print("\nAvailable routing algorithms:")
     print("  1. Dijkstra (shortest path)")
     print("  2. Bellman-Ford (distributed shortest path)")
-    print("  3. ACO (Ant Colony Optimization)")
-    print("  4. GA (Genetic Algorithm)")
-    print("  5. ALL (compare all algorithms)")
-    choice = get_int_input("Select algorithm (1-5): ", 1, 5)
+    print("  3. PCA-MR (proposed congestion-aware routing)")
+    print("  4. ACO (Ant Colony Optimization)")
+    print("  5. GA (Genetic Algorithm)")
+    print("  6. ALL (compare all algorithms)")
+    choice = get_int_input("Select algorithm (1-6): ", 1, 6)
 
     algo_map = {
         1: "dijkstra",
         2: "bellman_ford",
-        3: "aco",
-        4: "ga",
-        5: "all",
+        3: "pca_mr",
+        4: "aco",
+        5: "ga",
+        6: "all",
     }
     return algo_map[choice]
 
@@ -230,12 +232,13 @@ def run_single_simulation(network, algorithm_name, flows, seed=None):
 
 
 def run_comparison(network, flows, seed=None):
-    """Run and compare all four algorithms."""
+    """Run and compare all available algorithms."""
     algorithms = {
         "Dijkstra":    create_routing_algorithm("dijkstra", network, seed=seed),
         "Bellman-Ford": create_routing_algorithm("bellman_ford", network, seed=None if seed is None else seed + 1),
-        "ACO":         create_routing_algorithm("aco", network, seed=None if seed is None else seed + 2),
-        "GA":          create_routing_algorithm("ga", network, seed=None if seed is None else seed + 3),
+        "PCA-MR":      create_routing_algorithm("pca_mr", network, seed=None if seed is None else seed + 2),
+        "ACO":         create_routing_algorithm("aco", network, seed=None if seed is None else seed + 3),
+        "GA":          create_routing_algorithm("ga", network, seed=None if seed is None else seed + 4),
     }
     metrics_analyzer = PerformanceMetrics(network, seed=None if seed is None else seed + 10)
     comparison = metrics_analyzer.compare_algorithms(algorithms, flows)

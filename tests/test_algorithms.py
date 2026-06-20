@@ -4,7 +4,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from src.network.topology import NetworkTopology
-from src.algorithms.routing import BellmanFordRouting, DijkstraRouting, GARouting
+from src.algorithms.routing import BellmanFordRouting, DijkstraRouting, GARouting, PCAMRRouting, create_routing_algorithm
 
 class TestRoutingAlgorithms(unittest.TestCase):
     def setUp(self):
@@ -61,6 +61,30 @@ class TestRoutingAlgorithms(unittest.TestCase):
         self.assertEqual(repaired[-1], 4)
         for index in range(len(repaired) - 1):
             self.assertTrue(network.graph.has_edge(repaired[index], repaired[index + 1]))
+
+    def test_pca_mr_avoids_short_unreliable_path(self):
+        """PCA-MR should prefer reliable links over a lossy shortest path."""
+        network = NetworkTopology(seed=3)
+        network.load_from_data(
+            nodes=[{"id": 0}, {"id": 1}, {"id": 2}],
+            edges=[
+                {"source": 0, "target": 1, "weight": 1, "bandwidth": 100, "packet_loss": 0.8},
+                {"source": 1, "target": 2, "weight": 1, "bandwidth": 100, "packet_loss": 0.8},
+                {"source": 0, "target": 2, "weight": 10, "bandwidth": 100, "packet_loss": 0.0},
+            ],
+        )
+
+        dijkstra = DijkstraRouting(network)
+        pca_mr = PCAMRRouting(network)
+
+        self.assertEqual(dijkstra.route(0, 2), [0, 1, 2])
+        self.assertEqual(pca_mr.route(0, 2), [0, 2])
+
+    def test_factory_creates_pca_mr(self):
+        """The proposed algorithm should be available through the public factory."""
+        algorithm = create_routing_algorithm("pca_mr", self.network, seed=13)
+
+        self.assertIsInstance(algorithm, PCAMRRouting)
 
 if __name__ == '__main__':
     unittest.main()

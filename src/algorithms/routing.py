@@ -1,4 +1,5 @@
 import heapq
+import math
 import random
 from collections import defaultdict
 
@@ -103,6 +104,148 @@ class BellmanFordRouting(RoutingAlgorithm):
         path.reverse()
         
         return path if path[0] == source else None
+
+class PCAMRRouting(RoutingAlgorithm):
+    """Predictive Congestion-Aware Multipath Routing.
+
+    PCA-MR uses a dynamic link metric:
+        psi = alpha * normalized_weight
+              + beta * [-ln(1 - packet_loss)]
+              + gamma * load_ratio
+
+    The metric is smoothed over time and reused by Dijkstra-style route
+    selection, so busy or unreliable links become less attractive for later
+    flows even when their base distance is short.
+    """
+
+    def __init__(
+        self,
+        network,
+        alpha=0.35,
+        beta=0.4,
+        gamma=0.25,
+        prediction_smoothing=0.7,
+        seed=None,
+    ):
+        super().__init__(network, seed=seed)
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.prediction_smoothing = prediction_smoothing
+        self.edge_loads = defaultdict(float)
+        self.predicted_costs = {}
+        self.current_packet_size = 1.0
+
+    def set_current_flow(self, flow):
+        """Expose the next demand size before route selection."""
+        self.current_packet_size = max(float(getattr(flow, "size", 1.0) or 1.0), 0.0)
+
+    def update_edge_load(self, path, packet_size=None):
+        """Record routed demand so later flows can avoid hot links."""
+        if not path or len(path) < 2:
+            return
+
+        demand = self.current_packet_size if packet_size is None else max(float(packet_size or 0.0), 0.0)
+        for i in range(len(path) - 1):
+            self.edge_loads[self._edge_key(path[i], path[i + 1])] += demand
+
+    def route(self, source, destination):
+        try:
+            if source == destination:
+                return [source]
+            if source not in self.network.graph or destination not in self.network.graph:
+                return None
+
+            self._refresh_predicted_costs()
+            return self._dynamic_dijkstra(source, destination)
+        except Exception as e:
+            print(f"PCA-MR routing failed: {e}")
+            return None
+
+    def _dynamic_dijkstra(self, source, destination):
+        graph = self.network.graph
+        distances = {node: float("infinity") for node in graph.nodes()}
+        previous = {node: None for node in graph.nodes()}
+        distances[source] = 0
+        priority_queue = [(0, source)]
+        visited = set()
+
+        while priority_queue:
+            current_distance, current_node = heapq.heappop(priority_queue)
+            if current_node in visited:
+                continue
+
+            visited.add(current_node)
+            if current_node == destination:
+                break
+
+            for neighbor in graph.neighbors(current_node):
+                edge_cost = self.predicted_costs.get(
+                    self._edge_key(current_node, neighbor),
+                    self._current_edge_cost(current_node, neighbor),
+                )
+                distance = current_distance + edge_cost
+
+                if distance < distances[neighbor]:
+                    distances[neighbor] = distance
+                    previous[neighbor] = current_node
+                    heapq.heappush(priority_queue, (distance, neighbor))
+
+        path = []
+        current = destination
+        while current is not None:
+            path.append(current)
+            current = previous[current]
+        path.reverse()
+
+        return path if path and path[0] == source else None
+
+    def _refresh_predicted_costs(self):
+        for u, v in self.network.graph.edges():
+            key = self._edge_key(u, v)
+            current_cost = self._current_edge_cost(u, v)
+            previous_cost = self.predicted_costs.get(key, current_cost)
+            self.predicted_costs[key] = (
+                self.prediction_smoothing * current_cost
+                + (1 - self.prediction_smoothing) * previous_cost
+            )
+
+    def _current_edge_cost(self, u, v):
+        edge = self.network.graph[u][v]
+        normalized_weight = self._normalized_weight(edge)
+        loss = self._loss_probability(u, v, edge)
+        loss_penalty = -math.log(max(1.0 - loss, 1e-9))
+        load_ratio = self._projected_load_ratio(u, v, edge)
+
+        return (
+            self.alpha * normalized_weight
+            + self.beta * loss_penalty
+            + self.gamma * load_ratio
+        )
+
+    def _normalized_weight(self, edge):
+        weights = [
+            max(float(data.get("weight", 1.0)), 0.0)
+            for _, _, data in self.network.graph.edges(data=True)
+        ]
+        max_weight = max(weights, default=1.0) or 1.0
+        return max(float(edge.get("weight", 1.0)), 0.0) / max_weight
+
+    def _loss_probability(self, u, v, edge):
+        loss = max(
+            float(edge.get("packet_loss", 0.0)),
+            float(self.network.graph.nodes[u].get("packet_loss", 0.0)),
+            float(self.network.graph.nodes[v].get("packet_loss", 0.0)),
+        )
+        return min(max(loss, 0.0), 0.999999)
+
+    def _projected_load_ratio(self, u, v, edge):
+        bandwidth = max(float(edge.get("bandwidth", 100.0)), 1.0)
+        projected_load = self.edge_loads[self._edge_key(u, v)] + self.current_packet_size
+        return projected_load / bandwidth
+
+    def _edge_key(self, u, v):
+        return (min(u, v), max(u, v))
 
 class ACORouting(RoutingAlgorithm):
     """Ant Colony Optimization based routing"""
@@ -469,6 +612,7 @@ def create_routing_algorithm(algorithm_name, network, **kwargs):
     algorithms = {
         'dijkstra': DijkstraRouting,
         'bellman_ford': BellmanFordRouting,
+        'pca_mr': PCAMRRouting,
         'aco': ACORouting,
         'ga': GARouting
     }

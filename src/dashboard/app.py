@@ -407,6 +407,29 @@ def merge_failure_profiles(*profiles):
     merged["down_edges"] = list(dict.fromkeys(edge_from_storage_key(edge) for edge in merged["down_edges"]))
     return merged
 
+
+def get_recommendations(network_state, simulation_state):
+    payload = {
+        "network_state": network_state,
+        "simulation_state": simulation_state,
+    }
+    try:
+        return recommendation_api(payload)
+    except requests.RequestException:
+        return build_recommendations(network_state, simulation_state)
+
+
+def is_simulation_current(network_state, simulation_state):
+    if not network_state or not simulation_state:
+        return False
+
+    network_scenario = network_state.get("scenario_id")
+    simulation_scenario = simulation_state.get("scenario_id")
+    if network_scenario is None or simulation_scenario is None:
+        return True
+
+    return network_scenario == simulation_scenario
+
 def build_network_figure(network, title_label, node_count, simulation_state=None):
     if network is None or network.graph.number_of_nodes() == 0:
         return empty_figure()
@@ -430,6 +453,7 @@ def build_network_figure(network, title_label, node_count, simulation_state=None
         edge_data = edge_loads.get(edge_key, {})
         load_ratio = edge_data.get("load_ratio", 0)
         bandwidth = edge_data.get("bandwidth", graph[u][v].get("bandwidth", 0))
+        packet_loss = edge_data.get("packet_loss", graph[u][v].get("packet_loss", 0))
         stress_score = display_stress_score(load_ratio, max_load_ratio)
         color, width = edge_style(stress_score)
         hover_text = (
@@ -438,7 +462,7 @@ def build_network_figure(network, title_label, node_count, simulation_state=None
             f"Bandwidth: {bandwidth}<br>"
             f"Load ratio: {load_ratio:.2f}<br>"
             f"Display stress: {stress_score:.2f}<br>"
-            f"Packet loss: {graph[u][v].get('packet_loss', 0):.2f}"
+            f"Packet loss: {packet_loss:.2f}"
         )
         traces.append(
             go.Scatter(
@@ -944,6 +968,7 @@ app.layout = html.Div(
                                     options=[
                                         {"label": "Dijkstra (shortest path)", "value": "dijkstra"},
                                         {"label": "Bellman-Ford (distributed SP)", "value": "bellman_ford"},
+                                        {"label": "PCA-MR (proposed congestion-aware)", "value": "pca_mr"},
                                         {"label": "ACO (Ant Colony Optimization)", "value": "aco"},
                                         {"label": "GA (Genetic Algorithm)", "value": "ga"},
                                         {"label": "ALL - compare every algorithm", "value": "all"},
@@ -1080,7 +1105,6 @@ def update_congestion_ui(value):
 @app.callback(
     Output("network-status", "children"),
     Output("network-state", "data"),
-    Output("simulation-state", "data"),
     Output("report-state", "data"),
     Input("generate-network", "n_clicks"),
     State("topology-type", "value"),
@@ -1128,7 +1152,6 @@ def update_network_state(
     packet_loss_nodes,
     maintenance_edges,
 ):
-    del n_clicks
     node_count = int(node_count or 20)
     edge_prob = float(edge_prob or 0.3)
     seed = None if random_seed in (None, "") else int(random_seed)
@@ -1167,6 +1190,7 @@ def update_network_state(
     if random_failure_mode:
         status += " Random failure mode used the scenario seed for reproducible sampling."
     state = {
+        "scenario_id": n_clicks,
         "topology_type": topology_type,
         "node_count": node_count,
         "active_node_count": network.graph.number_of_nodes(),
@@ -1177,7 +1201,7 @@ def update_network_state(
         "failure_profile": serialise_failure_profile(failure_profile),
         "source_label": source_label,
     }
-    return status, state, None, None
+    return status, state, None
 
 
 @app.callback(
@@ -1189,6 +1213,8 @@ def render_network_graph(network_state, simulation_state):
     if not network_state:
         return empty_figure()
 
+    active_simulation = simulation_state if is_simulation_current(network_state, simulation_state) else None
+
     network = build_network(
         network_state["topology_type"],
         int(network_state["node_count"]),
@@ -1197,13 +1223,13 @@ def render_network_graph(network_state, simulation_state):
         network_state.get("import_data"),
         network_state.get("failure_profile"),
     )
-    return build_network_figure(network, network_state.get("source_label", "Scenario"), int(network_state["node_count"]), simulation_state)
+    return build_network_figure(network, network_state.get("source_label", "Scenario"), int(network_state["node_count"]), active_simulation)
 
 
 
 
 @app.callback(
-    Output("simulation-state", "data", allow_duplicate=True),
+    Output("simulation-state", "data"),
     Input("run-simulation", "n_clicks"),
     State("network-state", "data"),
     State("algorithm-type", "value"),
@@ -1230,8 +1256,11 @@ def run_simulation(
         "algorithm": algorithm_type,
         "nodes": network_state["node_count"],
         "traffic": traffic_intensity,
+        "flow_count": int(flow_count or 20),
         "seed": network_state.get("seed"),
-        "edge_prob": network_state["edge_prob"]
+        "edge_prob": network_state["edge_prob"],
+        "import_data": network_state.get("import_data"),
+        "failure_profile": network_state.get("failure_profile"),
     }
     if algorithm_type == "all":
         
@@ -1239,6 +1268,7 @@ def run_simulation(
 
         return {
             "mode": "all",
+            "scenario_id": network_state.get("scenario_id"),
             "comparison": api_result["comparison"],
             "scores": api_result["scores"],
             "seed": network_state.get("seed")
@@ -1248,6 +1278,7 @@ def run_simulation(
 
     return {
         "mode": "single",
+        "scenario_id": network_state.get("scenario_id"),
         "algorithm_label": algorithm_type.replace("_", " ").title(),
         "results": api_result,
         "edge_loads": api_result.get("edge_loads", {}),
@@ -1305,15 +1336,14 @@ def export_report(
     Input("report-state", "data"),
 )
 def render_results(simulation_state, network_state, report_state):
+    if simulation_state and not is_simulation_current(network_state, simulation_state):
+        simulation_state = None
+        report_state = None
 
     recommendations = []
 
     if simulation_state and network_state:
-
-        recommendations = recommendation_api({
-            "network_state": network_state,
-            "simulation_state": simulation_state
-        })
+        recommendations = get_recommendations(network_state, simulation_state)
 
     recommendations_panel = build_recommendations_panel(
         recommendations,

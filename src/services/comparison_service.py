@@ -3,6 +3,7 @@ from src.traffic.generator import TrafficGenerator
 from src.algorithms.routing import (
     DijkstraRouting,
     BellmanFordRouting,
+    PCAMRRouting,
     ACORouting,
     GARouting,
 )
@@ -83,6 +84,7 @@ def compare_algorithms(
     algorithms = {
         "dijkstra": DijkstraRouting(network, seed=seed),
         "bellman_ford": BellmanFordRouting(network, seed=seed),
+        "pca_mr": PCAMRRouting(network, seed=seed),
         "aco": ACORouting(network, seed=seed),
         "ga": GARouting(network, seed=seed),
     }

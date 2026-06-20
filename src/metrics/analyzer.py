@@ -65,6 +65,13 @@ class PerformanceMetrics:
             return 0.0
         return min(MAX_OVERLOAD_DROP, (load_ratio - 1) * OVERLOAD_DROP_FACTOR)
 
+    def _static_drop_probability(self, u, v, edge):
+        return max(
+            float(edge.get("packet_loss", 0.0)),
+            float(self.network.graph.nodes[u].get("packet_loss", 0.0)),
+            float(self.network.graph.nodes[v].get("packet_loss", 0.0)),
+        )
+
     def _apply_flow_effects(self, path, packet_size, edge_usage, edge_volume):
         delivered = True
         drop_probability = 0.0
@@ -80,11 +87,7 @@ class PerformanceMetrics:
             edge_volume[key] = projected_load
             edge_usage[key] += 1
 
-            static_drop = max(
-                float(edge.get("packet_loss", 0.0)),
-                float(self.network.graph.nodes[u].get("packet_loss", 0.0)),
-                float(self.network.graph.nodes[v].get("packet_loss", 0.0)),
-            )
+            static_drop = self._static_drop_probability(u, v, edge)
             drop_probability = max(drop_probability, static_drop, self._capacity_drop_probability(load_ratio))
 
             if self.simulate_congestion:
@@ -101,15 +104,20 @@ class PerformanceMetrics:
             key = self._edge_key(u, v)
             load = edge_volume.get(key, 0.0)
             bandwidth = max(float(data.get("bandwidth", 100)), 1.0)
+            load_ratio = load / bandwidth
+            packet_loss = max(
+                self._static_drop_probability(u, v, data),
+                self._capacity_drop_probability(load_ratio),
+            )
             edge_loads[f"{key[0]}-{key[1]}"] = {
                 "u": key[0],
                 "v": key[1],
                 "load": round(load, 2),
                 "packets": edge_usage.get(key, 0),
                 "bandwidth": bandwidth,
-                "load_ratio": round(load / bandwidth, 4),
+                "load_ratio": round(load_ratio, 4),
                 "weight": round(float(data.get("weight", 1.0)), 4),
-                "packet_loss": round(float(data.get("packet_loss", 0.0)), 4),
+                "packet_loss": round(packet_loss, 4),
             }
         return edge_loads
 
@@ -130,6 +138,9 @@ class PerformanceMetrics:
         for flow in traffic_flows:
             if hasattr(algorithm, "_initialize_pheromones"):
                 algorithm._initialize_pheromones()
+
+            if hasattr(algorithm, "set_current_flow"):
+                algorithm.set_current_flow(flow)
 
             path = algorithm.route(flow.source, flow.destination)
 
@@ -180,7 +191,10 @@ class PerformanceMetrics:
             )
 
             if hasattr(algorithm, "update_edge_load"):
-                algorithm.update_edge_load(path)
+                try:
+                    algorithm.update_edge_load(path, flow.size)
+                except TypeError:
+                    algorithm.update_edge_load(path)
 
         execution_time = time.time() - start_time
         edge_loads = self._serialise_edge_loads(edge_usage, edge_volume)
