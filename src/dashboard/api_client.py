@@ -1,4 +1,15 @@
-import requests
+try:
+    import requests
+    RequestException = requests.RequestException
+except ModuleNotFoundError:  # pragma: no cover - only used in minimal test envs
+    class RequestException(Exception):
+        pass
+
+    class _MissingRequests:
+        def post(self, *_args, **_kwargs):
+            raise RequestException("The requests package is required for dashboard API calls.")
+
+    requests = _MissingRequests()
 
 from src.dashboard.config import API_BASE_URL
 

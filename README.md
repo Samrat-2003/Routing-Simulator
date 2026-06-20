@@ -209,7 +209,7 @@ Each simulation can report:
 | --- | --- |
 | Dijkstra | Deterministic shortest-path routing using edge weights. |
 | Bellman-Ford | Shortest-path routing with repeated edge relaxation. |
-| PCA-MR | Proposed Predictive Congestion-Aware Multipath Routing using normalized cost, logarithmic loss penalty, and link load ratio. |
+| PCA-MR | Proposed Predictive Congestion-Aware Multipath Routing using adaptive weights, logarithmic loss penalty, nonlinear congestion penalty, and top-k candidate path selection. |
 | ACO | Stochastic path optimization using pheromone trails and edge-cost heuristics. |
 | GA | Stochastic route search using population selection, crossover, mutation, and repair. |
 
@@ -218,19 +218,19 @@ Each simulation can report:
 PCA-MR, or Predictive Congestion-Aware Multipath Routing, is the proposed algorithm in this project. Instead of selecting a route only by shortest distance, it computes a dynamic link score:
 
 ```text
-psi(u,v,t) = alpha * normalized_weight(u,v)
-           + beta  * [-ln(1 - loss(u,v,t))]
-           + gamma * load_ratio(u,v,t)
+psi(u,v,t) = alpha(t) * normalized_weight(u,v)
+           + beta(t)  * [-ln(1 - loss(u,v,t))]
+           + gamma(t) * congestion_penalty(rho(u,v,t))
 ```
 
 Where:
 
 - `normalized_weight` represents the base delay or distance of the link.
 - `loss` represents current packet-loss probability on the link or adjacent nodes.
-- `load_ratio` represents projected traffic load divided by available bandwidth.
-- `alpha`, `beta`, and `gamma` control the importance of distance, reliability, and congestion.
+- `rho` represents projected traffic load divided by available bandwidth.
+- `alpha(t)`, `beta(t)`, and `gamma(t)` adapt to the current scenario, increasing reliability emphasis when packet loss is high and congestion emphasis when links approach overload.
 
-The logarithmic loss term sharply penalizes unreliable links as packet loss rises. PCA-MR also remembers previously routed demand and smooths link scores over time, so later flows are pushed away from congested or lossy links. This makes it strongest in scenarios with high traffic, packet-loss zones, bandwidth limits, or maintenance-degraded links.
+The logarithmic loss term sharply penalizes unreliable links as packet loss rises. The congestion term is nonlinear, so harmless utilization is not punished strongly, but bottlenecks near or above capacity become expensive. PCA-MR also remembers previously routed demand, smooths link scores over time, and evaluates the top-k candidate paths before selecting the best path for the next flow. This makes it strongest in scenarios with high traffic, packet-loss zones, bandwidth limits, or maintenance-degraded links.
 
 ## Configuration
 

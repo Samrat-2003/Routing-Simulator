@@ -22,6 +22,14 @@ class TestMainHelpers(unittest.TestCase):
         self.assertEqual(network.graph.number_of_nodes(), 5)
         self.assertEqual(network.graph.number_of_edges(), 10)
 
+    def test_build_network_supports_bandwidth_range(self):
+        """CLI network builder should pass custom bandwidth ranges to generated links."""
+        network = build_network("mesh", 5, seed=7, bandwidth_range=(30, 35))
+        bandwidths = [data["bandwidth"] for _, _, data in network.graph.edges(data=True)]
+
+        self.assertGreaterEqual(min(bandwidths), 30)
+        self.assertLessEqual(max(bandwidths), 35)
+
     def test_export_single_result_to_json(self):
         """Single-run results should export as JSON."""
         results = {

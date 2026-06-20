@@ -41,6 +41,8 @@ class TestDashboardScenarioState(unittest.TestCase):
             5,
             0.3,
             None,
+            15,
+            30,
             None,
             None,
             0,
@@ -60,9 +62,11 @@ class TestDashboardScenarioState(unittest.TestCase):
         )
 
         self.assertIn("Mesh ready", status)
+        self.assertIn("Bandwidth range: 15-30", status)
         self.assertEqual(network_state["scenario_id"], 1)
         self.assertEqual(network_state["active_node_count"], 5)
         self.assertEqual(network_state["active_edge_count"], 10)
+        self.assertEqual(network_state["bandwidth_range"], [15, 30])
         self.assertIsNone(report_state)
 
     def test_failure_profile_survives_dash_json_round_trip(self):
@@ -137,6 +141,23 @@ class TestDashboardScenarioState(unittest.TestCase):
         )
 
         self.assertEqual(network.graph[1][2]["packet_loss"], 0.35)
+
+    def test_backend_applies_dashboard_bandwidth_range(self):
+        """Backend-generated scenarios should honor dashboard bandwidth controls."""
+        network = build_network_from_request(
+            {
+                "topology": "mesh",
+                "nodes": 5,
+                "edge_prob": 0.3,
+                "seed": 4,
+                "bandwidth_range": [12, 18],
+                "failure_profile": {},
+            }
+        )
+
+        bandwidths = [data["bandwidth"] for _, _, data in network.graph.edges(data=True)]
+        self.assertGreaterEqual(min(bandwidths), 12)
+        self.assertLessEqual(max(bandwidths), 18)
 
     def test_edge_hover_prefers_simulation_packet_loss(self):
         """Hovered edge labels should show runtime packet-loss risk when available."""

@@ -74,6 +74,7 @@ def build_network_from_request(data):
 
     seed = data.get("seed")
     edge_prob = float(data.get("edge_prob", 0.3))
+    bandwidth_range = data.get("bandwidth_range", [data.get("bandwidth_min", 10), data.get("bandwidth_max", 100)])
 
     network = NetworkTopology(seed=seed)
     import_data = data.get("import_data")
@@ -82,18 +83,19 @@ def build_network_from_request(data):
         network.load_from_data(import_data.get("nodes"), import_data.get("edges"), seed=seed)
 
     elif topology == "mesh":
-        network.create_mesh_topology(nodes)
+        network.create_mesh_topology(nodes, bandwidth_range=bandwidth_range)
 
     elif topology == "ring":
-        network.create_ring_topology(nodes)
+        network.create_ring_topology(nodes, bandwidth_range=bandwidth_range)
 
     elif topology == "star":
-        network.create_star_topology(nodes)
+        network.create_star_topology(nodes, bandwidth_range=bandwidth_range)
 
     elif topology == "random":
         network.create_random_topology(
             nodes,
-            p=edge_prob
+            p=edge_prob,
+            bandwidth_range=bandwidth_range
         )
 
     else:

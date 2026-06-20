@@ -37,14 +37,14 @@ class NetworkTopology:
         self.set_seed(effective_seed)
         return effective_seed
 
-    def create_mesh_topology(self, n_nodes=10, seed=None):
+    def create_mesh_topology(self, n_nodes=10, seed=None, bandwidth_range=(10, 100)):
         """Create a mesh network topology"""
         self._prepare_rng(seed)
         self.graph = nx.complete_graph(n_nodes)
-        self._assign_edge_weights()
+        self._assign_edge_weights(bandwidth_range=bandwidth_range)
         return self.graph
 
-    def create_random_topology(self, n_nodes=10, p=0.3, seed=None):
+    def create_random_topology(self, n_nodes=10, p=0.3, seed=None, bandwidth_range=(10, 100)):
         """Create a random network topology using Erdos-Renyi model"""
         effective_seed = self._prepare_rng(seed)
         self.graph = nx.erdos_renyi_graph(n_nodes, p, seed=effective_seed)
@@ -52,21 +52,21 @@ class NetworkTopology:
         if not nx.is_connected(self.graph):
             fallback_seed = self.random.randint(0, 10**9)
             self.graph = nx.connected_watts_strogatz_graph(n_nodes, 3, 0.3, seed=fallback_seed)
-        self._assign_edge_weights()
+        self._assign_edge_weights(bandwidth_range=bandwidth_range)
         return self.graph
 
-    def create_ring_topology(self, n_nodes=10, seed=None):
+    def create_ring_topology(self, n_nodes=10, seed=None, bandwidth_range=(10, 100)):
         """Create a ring network topology"""
         self._prepare_rng(seed)
         self.graph = nx.cycle_graph(n_nodes)
-        self._assign_edge_weights()
+        self._assign_edge_weights(bandwidth_range=bandwidth_range)
         return self.graph
 
-    def create_star_topology(self, n_nodes=10, seed=None):
+    def create_star_topology(self, n_nodes=10, seed=None, bandwidth_range=(10, 100)):
         """Create a star network topology"""
         self._prepare_rng(seed)
         self.graph = nx.star_graph(n_nodes - 1)
-        self._assign_edge_weights()
+        self._assign_edge_weights(bandwidth_range=bandwidth_range)
         return self.graph
 
     def load_from_data(self, nodes=None, edges=None, seed=None):
@@ -104,6 +104,7 @@ class NetworkTopology:
                 source,
                 target,
                 weight=weight,
+                base_weight=weight,  # static distance, untouched by congestion
                 bandwidth=bandwidth,
                 packet_loss=packet_loss,
                 maintenance_factor=float(attrs.pop("maintenance_factor", 1.0)),
@@ -138,10 +139,16 @@ class NetworkTopology:
 
         for (u, v), factor in profile.get("maintenance_edges", {}).items():
             if self.graph.has_edge(u, v):
-                base_weight = float(self.graph[u][v].get("weight", 1))
+                # Maintenance is a persistent scenario condition, not transient
+                # congestion, so it updates base_weight (the congestion-free
+                # reference distance) as well as the live weight.
+                pre_maintenance_weight = float(
+                    self.graph[u][v].get("base_weight", self.graph[u][v].get("weight", 1))
+                )
                 multiplier = max(1.0, float(factor))
                 self.graph[u][v]["maintenance_factor"] = multiplier
-                self.graph[u][v]["weight"] = base_weight * multiplier
+                self.graph[u][v]["base_weight"] = pre_maintenance_weight * multiplier
+                self.graph[u][v]["weight"] = pre_maintenance_weight * multiplier
 
     def build_random_failure_profile(
         self,
@@ -187,12 +194,25 @@ class NetworkTopology:
             "maintenance_edges": maintenance_edges,
         }
 
-    def _assign_edge_weights(self):
+    def _normalise_bandwidth_range(self, bandwidth_range):
+        if not bandwidth_range:
+            return 10, 100
+
+        low, high = bandwidth_range
+        low = max(1, int(float(low)))
+        high = max(1, int(float(high)))
+        if low > high:
+            low, high = high, low
+        return low, high
+
+    def _assign_edge_weights(self, bandwidth_range=(10, 100)):
         """Assign random weights to edges (representing delay/cost)"""
+        bandwidth_min, bandwidth_max = self._normalise_bandwidth_range(bandwidth_range)
         for (u, v) in self.graph.edges():
             weight = self.random.randint(1, 10)
             self.graph[u][v]["weight"] = weight
-            self.graph[u][v]["bandwidth"] = self.random.randint(10, 100)
+            self.graph[u][v]["base_weight"] = weight  # static distance, untouched by congestion
+            self.graph[u][v]["bandwidth"] = self.random.randint(bandwidth_min, bandwidth_max)
             self.graph[u][v]["packet_loss"] = 0.0
             self.graph[u][v]["maintenance_factor"] = 1.0
         for node in self.graph.nodes():

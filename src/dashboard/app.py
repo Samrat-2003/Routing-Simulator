@@ -5,7 +5,6 @@ import os
 import sys
 import types
 from importlib import metadata
-import requests
 
 try:
     import pkg_resources  # noqa: F401
@@ -38,7 +37,7 @@ if PROJECT_ROOT not in sys.path:
 from src.network.topology import NetworkTopology
 from src.planning.recommendations import build_recommendations
 from src.reporting.exporter import export_simulation_bundle
-from src.dashboard.api_client import simulate,compare,report
+from src.dashboard.api_client import RequestException, simulate,compare,report
 from src.dashboard.api_client import recommendations as recommendation_api
 
 
@@ -367,16 +366,16 @@ def merge_import_records(files):
     return merged, notes
 
 
-def build_network(topology_type, node_count, edge_prob, seed, import_data=None, failure_profile=None):
+def build_network(topology_type, node_count, edge_prob, seed, import_data=None, failure_profile=None, bandwidth_range=(10, 100)):
     network = NetworkTopology(seed=seed)
     if import_data and import_data.get("edges"):
         network.load_from_data(import_data.get("nodes"), import_data.get("edges"), seed=seed)
     else:
         builders = {
-            "mesh": lambda: network.create_mesh_topology(node_count, seed=seed),
-            "random": lambda: network.create_random_topology(node_count, edge_prob, seed=seed),
-            "ring": lambda: network.create_ring_topology(node_count, seed=seed),
-            "star": lambda: network.create_star_topology(node_count, seed=seed),
+            "mesh": lambda: network.create_mesh_topology(node_count, seed=seed, bandwidth_range=bandwidth_range),
+            "random": lambda: network.create_random_topology(node_count, edge_prob, seed=seed, bandwidth_range=bandwidth_range),
+            "ring": lambda: network.create_ring_topology(node_count, seed=seed, bandwidth_range=bandwidth_range),
+            "star": lambda: network.create_star_topology(node_count, seed=seed, bandwidth_range=bandwidth_range),
         }
         builders[topology_type]()
 
@@ -415,7 +414,7 @@ def get_recommendations(network_state, simulation_state):
     }
     try:
         return recommendation_api(payload)
-    except requests.RequestException:
+    except RequestException:
         return build_recommendations(network_state, simulation_state)
 
 
@@ -854,6 +853,14 @@ app.layout = html.Div(
                                 ),
                                 html.Label("Random Seed", style=LABEL),
                                 dcc.Input(id="random-seed", type="number", value=42, step=1, style=INPUT_STYLE),
+                                html.Label("Bandwidth Range", style=LABEL),
+                                html.Div(
+                                    style={"display": "grid", "gridTemplateColumns": "repeat(2, minmax(0, 1fr))", "gap": "10px"},
+                                    children=[
+                                        dcc.Input(id="bandwidth-min", type="number", value=10, min=1, step=1, style=INPUT_STYLE),
+                                        dcc.Input(id="bandwidth-max", type="number", value=100, min=1, step=1, style=INPUT_STYLE),
+                                    ],
+                                ),
                                 html.Button("Build Scenario", id="generate-network", n_clicks=0, style=BUTTON_STYLE),
                                 html.Div(id="network-status", style={"marginTop": "12px", "fontFamily": SANS_STACK, "fontSize": "13px", "color": COLORS["muted"]}),
                             ],
@@ -1111,6 +1118,8 @@ def update_congestion_ui(value):
     State("node-count", "value"),
     State("edge-prob", "value"),
     State("random-seed", "value"),
+    State("bandwidth-min", "value"),
+    State("bandwidth-max", "value"),
     State("import-state", "data"),
     State("random-failure-mode", "value"),
     State("random-down-node-count", "value"),
@@ -1135,6 +1144,8 @@ def update_network_state(
     node_count,
     edge_prob,
     random_seed,
+    bandwidth_min,
+    bandwidth_max,
     import_state,
     random_failure_mode,
     random_down_node_count,
@@ -1155,6 +1166,11 @@ def update_network_state(
     node_count = int(node_count or 20)
     edge_prob = float(edge_prob or 0.3)
     seed = None if random_seed in (None, "") else int(random_seed)
+    bandwidth_min = max(1, int(bandwidth_min or 10))
+    bandwidth_max = max(1, int(bandwidth_max or 100))
+    if bandwidth_min > bandwidth_max:
+        bandwidth_min, bandwidth_max = bandwidth_max, bandwidth_min
+    bandwidth_range = (bandwidth_min, bandwidth_max)
 
     manual_failure_profile = build_manual_failure_profile(
         down_nodes,
@@ -1164,7 +1180,7 @@ def update_network_state(
         maintenance_edges,
     )
 
-    preview_network = build_network(topology_type, node_count, edge_prob, seed, import_state, None)
+    preview_network = build_network(topology_type, node_count, edge_prob, seed, import_state, None, bandwidth_range)
     random_failure_profile = {}
     if random_failure_mode:
         random_failure_profile = preview_network.build_random_failure_profile(
@@ -1180,10 +1196,11 @@ def update_network_state(
 
     failure_profile = merge_failure_profiles(manual_failure_profile, random_failure_profile)
 
-    network = build_network(topology_type, node_count, edge_prob, seed, import_state, failure_profile)
+    network = build_network(topology_type, node_count, edge_prob, seed, import_state, failure_profile, bandwidth_range)
     source_label = "Imported scenario" if import_state and import_state.get("edges") else topology_type.capitalize()
     status = (
         f"{source_label} ready with {network.graph.number_of_nodes()} nodes and {network.graph.number_of_edges()} edges. "
+        f"Bandwidth range: {bandwidth_min}-{bandwidth_max}. "
         f"Failures: {len(failure_profile['down_nodes'])} node-down, {len(failure_profile['down_edges'])} link-down, "
         f"{len(failure_profile['maintenance_edges'])} maintenance overrides."
     )
@@ -1196,6 +1213,9 @@ def update_network_state(
         "active_node_count": network.graph.number_of_nodes(),
         "active_edge_count": network.graph.number_of_edges(),
         "edge_prob": edge_prob,
+        "bandwidth_min": bandwidth_min,
+        "bandwidth_max": bandwidth_max,
+        "bandwidth_range": [bandwidth_min, bandwidth_max],
         "seed": seed,
         "import_data": import_state,
         "failure_profile": serialise_failure_profile(failure_profile),
@@ -1222,6 +1242,7 @@ def render_network_graph(network_state, simulation_state):
         network_state.get("seed"),
         network_state.get("import_data"),
         network_state.get("failure_profile"),
+        network_state.get("bandwidth_range", [10, 100]),
     )
     return build_network_figure(network, network_state.get("source_label", "Scenario"), int(network_state["node_count"]), active_simulation)
 
@@ -1259,6 +1280,9 @@ def run_simulation(
         "flow_count": int(flow_count or 20),
         "seed": network_state.get("seed"),
         "edge_prob": network_state["edge_prob"],
+        "bandwidth_range": network_state.get("bandwidth_range", [10, 100]),
+        "bandwidth_min": network_state.get("bandwidth_min", 10),
+        "bandwidth_max": network_state.get("bandwidth_max", 100),
         "import_data": network_state.get("import_data"),
         "failure_profile": network_state.get("failure_profile"),
     }

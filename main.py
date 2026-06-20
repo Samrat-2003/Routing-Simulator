@@ -52,7 +52,11 @@ def get_network_config():
     edge_prob = None
     if topology_type == "random":
         edge_prob = get_float_input("Enter edge probability (0.1-0.8): ", 0.1, 0.8)
-    return topology_type, node_count, edge_prob
+    bandwidth_min = get_int_input("Enter minimum link bandwidth (1-1000): ", 1, 1000)
+    bandwidth_max = get_int_input("Enter maximum link bandwidth (1-1000): ", 1, 1000)
+    if bandwidth_min > bandwidth_max:
+        bandwidth_min, bandwidth_max = bandwidth_max, bandwidth_min
+    return topology_type, node_count, edge_prob, (bandwidth_min, bandwidth_max)
 
 
 def get_topology_choice():
@@ -115,17 +119,17 @@ def get_traffic_config():
         return "custom", flow_count
 
 
-def build_network(topology_type, node_count, edge_prob=None, seed=None):
+def build_network(topology_type, node_count, edge_prob=None, seed=None, bandwidth_range=(10, 100)):
     """Create and return the selected network topology."""
     network = NetworkTopology(seed=seed)
     if topology_type == "random":
-        network.create_random_topology(node_count, edge_prob or 0.3, seed=seed)
+        network.create_random_topology(node_count, edge_prob or 0.3, seed=seed, bandwidth_range=bandwidth_range)
     elif topology_type == "mesh":
-        network.create_mesh_topology(node_count, seed=seed)
+        network.create_mesh_topology(node_count, seed=seed, bandwidth_range=bandwidth_range)
     elif topology_type == "ring":
-        network.create_ring_topology(node_count, seed=seed)
+        network.create_ring_topology(node_count, seed=seed, bandwidth_range=bandwidth_range)
     elif topology_type == "star":
-        network.create_star_topology(node_count, seed=seed)
+        network.create_star_topology(node_count, seed=seed, bandwidth_range=bandwidth_range)
     else:
         raise ValueError(f"Unknown topology type: {topology_type}")
 
@@ -253,12 +257,12 @@ def interactive_mode(seed=None, export_path=None):
     print("=" * 55)
 
     # Collect inputs
-    topology_type, node_count, edge_prob = get_network_config()
+    topology_type, node_count, edge_prob, bandwidth_range = get_network_config()
     algorithm_name        = get_algorithm_choice()
     intensity, flow_count = get_traffic_config()
 
     # Build network & traffic
-    network     = build_network(topology_type, node_count, edge_prob=edge_prob, seed=seed)
+    network     = build_network(topology_type, node_count, edge_prob=edge_prob, seed=seed, bandwidth_range=bandwidth_range)
     traffic_gen = TrafficGenerator(network, intensity, seed=None if seed is None else seed + 20)
     flows       = traffic_gen.generate_flows(flow_count)
     print(f"Generated {len(flows)} traffic flows.")

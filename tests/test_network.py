@@ -51,6 +51,25 @@ class TestNetworkTopology(unittest.TestCase):
 
         self.assertEqual(sorted(graph_a.edges(data="weight")), sorted(graph_b.edges(data="weight")))
 
+    def test_generated_topology_respects_bandwidth_range(self):
+        """Generated links should use the user-selected bandwidth range."""
+        network = NetworkTopology(seed=31)
+        graph = network.create_mesh_topology(6, seed=31, bandwidth_range=(20, 25))
+
+        bandwidths = [data["bandwidth"] for _, _, data in graph.edges(data=True)]
+        self.assertTrue(bandwidths)
+        self.assertGreaterEqual(min(bandwidths), 20)
+        self.assertLessEqual(max(bandwidths), 25)
+
+    def test_reversed_bandwidth_range_is_normalised(self):
+        """Bandwidth inputs should be accepted even if the user swaps min and max."""
+        network = NetworkTopology(seed=32)
+        graph = network.create_ring_topology(5, seed=32, bandwidth_range=(40, 10))
+
+        bandwidths = [data["bandwidth"] for _, _, data in graph.edges(data=True)]
+        self.assertGreaterEqual(min(bandwidths), 10)
+        self.assertLessEqual(max(bandwidths), 40)
+
     def test_imported_topology_and_failure_profile(self):
         """Imported topologies should accept explicit failure rules."""
         network = NetworkTopology(seed=12)
